@@ -5905,6 +5905,8 @@ var AudioPlayer = class {
     this._decoderErrors = 0;
     this._lastConfig = null;
     this._once = /* @__PURE__ */ Object.create(null);
+    this._decodeFailStreak = 0;
+    this._unsupported = false;
   }
   _logOnce(key, msg, level) {
     if (this._once[key]) return;
@@ -5998,15 +6000,19 @@ var AudioPlayer = class {
             "\u97F3\u9891\u6536\u5230\u914D\u7F6E\u5305\uFF0C\u957F\u5EA6=" + (pkt.data ? pkt.data.length : 0) + "\uFF0C\u9996\u5B57\u8282=" + (pkt.data && pkt.data.length ? "0x" + pkt.data[0].toString(16) : "\u7A7A"),
             "dim"
           );
-          this._configure(pkt.data);
+          await this._configure(pkt.data);
         } else if (pkt.type === "data") {
+          if (this._unsupported) {
+            this._logOnce("unsupported-stop", "\u6D4F\u89C8\u5668\u4E0D\u652F\u6301\u8BE5\u97F3\u9891\u89E3\u7801\uFF0C\u5DF2\u5FFD\u7565\u540E\u7EED\u97F3\u9891\u5E27\uFF08\u4E0D\u5F71\u54CD\u6295\u5C4F\uFF09", "dim");
+            break;
+          }
           this._pktCount += 1;
           if (this._pktCount <= 3) this.log("\u97F3\u9891\u6570\u636E\u5305#" + this._pktCount + " pts=" + pkt.pts, "dim");
           if (!this._configured || !this.decoder || this.decoder.state !== "configured") {
             if (this._decoderErrors < 3 && this._lastConfig) {
               this._logOnce("recreate", "\u97F3\u9891\u89E3\u7801\u5668\u5F02\u5E38\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u5EFA\uFF08\u7B2C " + (this._decoderErrors + 1) + " \u6B21\uFF09\u2026", "warn");
               this._createDecoder();
-              this._configure(this._lastConfig.configData);
+              await this._configure(this._lastConfig.configData);
             }
             if (!this._configured) {
               if (!this._lastConfig) {
@@ -6017,19 +6023,38 @@ var AudioPlayer = class {
               break;
             }
           }
+          if (!pkt.data || pkt.data.byteLength === 0) {
+            this._logOnce("empty-frame", "\u97F3\u9891\u6536\u5230\u7A7A\u6570\u636E\u5E27\uFF0C\u5DF2\u8DF3\u8FC7", "warn");
+            continue;
+          }
           try {
             let ts = Number(pkt.pts ?? 0);
             if (this._lastTs < 0) this._ts = ts;
             else this._ts = Math.max(ts, this._lastTs + 1);
             this._lastTs = this._ts;
+            const frameType = this._webCodec === "opus" ? "key" : pkt.keyframe ? "key" : "delta";
             const chunk = new EncodedAudioChunk({
-              type: "delta",
+              type: frameType,
               timestamp: this._ts,
               data: pkt.data
             });
             this.decoder.decode(chunk);
+            this._decodeFailStreak = 0;
           } catch (e) {
-            this.log("\u97F3\u9891\u89E3\u7801\u629B\u5F02\u5E38\uFF1A" + (e?.message || e), "err");
+            this._decodeFailStreak += 1;
+            if (this._decodeFailStreak === 1) {
+              const head = pkt.data && pkt.data.byteLength >= 8 ? Array.from(pkt.data.slice(0, 8)).map((b) => "0x" + b.toString(16).padStart(2, "0")).join(" ") : "(\u6570\u636E\u8FC7\u77ED)";
+              this.log(
+                "\u97F3\u9891\u89E3\u7801\u629B\u5F02\u5E38\uFF1A" + (e?.name || "") + " " + (e?.message || e) + " | \u5E27\u957F=" + (pkt.data ? pkt.data.byteLength : 0) + " \u5E27\u5934=" + head,
+                "err"
+              );
+            } else if (this._decodeFailStreak === 3) {
+              this.log(
+                "\u97F3\u9891\u89E3\u7801\u8FDE\u7EED\u5931\u8D25 3 \u6B21\uFF08\u5DF2\u505C\u6B62\u97F3\u9891\uFF0C\u4E0D\u5F71\u54CD\u6295\u5C4F\uFF09\u3002\u628A\u4E0A\u9762\u90A3\u6761\u300C\u97F3\u9891\u89E3\u7801\u629B\u5F02\u5E38\u300D\u6574\u884C\u8D34\u7ED9\u6211\uFF0C\u91CD\u70B9\u770B \u5E27\u957F/\u5E27\u5934/\u9519\u8BEF\u540D\u3002",
+                "err"
+              );
+            }
+            if (this._decodeFailStreak >= 3) break;
           }
         } else {
           this.log("\u97F3\u9891\u672A\u77E5\u5305\u7C7B\u578B\uFF1A" + JSON.stringify(pkt.type), "warn");
@@ -6039,7 +6064,7 @@ var AudioPlayer = class {
       this.log("\u97F3\u9891\u6D41\u8BFB\u53D6\u7ED3\u675F/\u51FA\u9519\uFF1A" + (e?.message || e), "warn");
     }
   }
-  _configure(configData) {
+  async _configure(configData) {
     let channels = 2;
     let sampleRate = 48e3;
     let headForCodec = configData ? new Uint8Array(configData) : null;
@@ -6059,6 +6084,26 @@ var AudioPlayer = class {
       if (parsed) {
         channels = parsed.channels;
         sampleRate = parsed.sampleRate;
+      }
+    }
+    if (typeof AudioDecoder !== "undefined" && AudioDecoder.isConfigSupported) {
+      try {
+        const probe = {
+          codec: this._webCodec,
+          sampleRate,
+          numberOfChannels: channels
+        };
+        if (headForCodec) probe.description = new Uint8Array(headForCodec);
+        const sup = await AudioDecoder.isConfigSupported(probe);
+        this.log("\u97F3\u9891\u89E3\u7801\u80FD\u529B\u63A2\u6D4B\uFF1A" + (sup?.supported ? "\u652F\u6301 " : "\u4E0D\u652F\u6301 ") + this._webCodec + "@" + sampleRate + "/" + channels + "ch", sup?.supported ? "ok" : "warn");
+        if (!sup?.supported) {
+          this.log("\u5F53\u524D\u6D4F\u89C8\u5668 AudioDecoder \u4E0D\u652F\u6301\u8BE5\u97F3\u9891\u914D\u7F6E\uFF0C\u5DF2\u8DF3\u8FC7\u58F0\u97F3\uFF08\u4E0D\u5F71\u54CD\u6295\u5C4F\uFF09", "warn");
+          this._unsupported = true;
+          this.onState({ available: false, error: "AudioDecoder \u4E0D\u652F\u6301 " + this._webCodec });
+          return;
+        }
+      } catch (e) {
+        this.log("\u97F3\u9891\u89E3\u7801\u80FD\u529B\u63A2\u6D4B\u5F02\u5E38\uFF08\u7EE7\u7EED\u5C1D\u8BD5\uFF09\uFF1A" + (e?.message || e), "warn");
       }
     }
     try {
