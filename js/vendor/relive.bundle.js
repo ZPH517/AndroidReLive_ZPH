@@ -6162,7 +6162,7 @@ var AudioPlayer = class {
         }
       } else {
         const inter = new Float32Array(numberOfFrames * numberOfChannels);
-        audioData.copyTo(inter, { format: fmt });
+        audioData.copyTo(inter, { planeIndex: 0, format: fmt });
         for (let c = 0; c < numberOfChannels; c += 1) {
           const ch = new Float32Array(numberOfFrames);
           for (let i = 0; i < numberOfFrames; i += 1) ch[i] = inter[i * numberOfChannels + c];
@@ -6179,7 +6179,10 @@ var AudioPlayer = class {
       src.start(this._nextTime);
       this._nextTime += dur;
     } catch (e) {
-      this.log("\u97F3\u9891\u64AD\u653E\u51FA\u9519\uFF1A" + (e?.message || e), "err");
+      this._playErrors = (this._playErrors || 0) + 1;
+      if (this._playErrors <= 3) {
+        this.log("\u97F3\u9891\u64AD\u653E\u51FA\u9519\uFF1A" + (e?.message || e), "err");
+      }
       try {
         audioData.close();
       } catch {

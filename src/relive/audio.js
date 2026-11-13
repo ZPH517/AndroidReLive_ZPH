@@ -16,17 +16,15 @@ SPDX-License-Identifier: GPL-3.0-only
 只依赖浏览器原生能力，不引第三方库。任何一步失败都只告警、不影响投屏画面。
 每一步都会通过 log() 打到右侧运行日志，前缀 [音频]，方便排错。
 
-这次修的坑（2026-11-13 第二轮）：
-  1. 上一轮的"解码器死亡重建"只拦得住 closed 状态；但 decode() 同步抛 DataError
-     （数据被拒）时解码器仍是 configured，旧兜底完全拦不住 → 每帧都抛、疯狂刷屏。
-     现在：连续解码失败计数，第一次失败打完整诊断（错误名/帧长/帧头十六进制），
-     连续 3 次安静停掉。
-  2. 配置前先用 AudioDecoder.isConfigSupported 探测，浏览器不支持 opus 就明确报出来，
-     不再"配置成功、解码全挂"。
-  3. Opus 帧统一标 type:"key"（Opus 帧互相独立，WebCodecs 官方推荐）。
+这次修的坑（2026-11-13 第三轮）：
+  1. 第二轮把 Opus 帧标 type:"key" 后解码已正常（日志出现「音频已解码一帧」）。
+  2. 解出来的帧在播放环节全挂：交错格式分支调 AudioData.copyTo 时漏传了
+     必填参数 planeIndex（交错格式整帧都在平面 0），浏览器直接抛
+     "Required member is undefined"。已补 planeIndex:0。
+  3. 播放错误同样加防刷屏计数（最多打 3 条）。
 
-前一轮已修（2026-11-13 第一轮）：
-  1. 解码器进入 closed 后自动重建（最多 3 次），重建不了安静停。
+前两轮（2026-11-13）：
+  1. decode 同步 DataError / closed 重建兜底 + 连续失败 3 次安静停 + isConfigSupported 探测。
   2. Opus 缺标准 OpusHead 时合成默认头（立体声 48k）。
 */
 
@@ -396,7 +394,8 @@ export class AudioPlayer {
         }
       } else {
         const inter = new Float32Array(numberOfFrames * numberOfChannels);
-        audioData.copyTo(inter, { format: fmt });
+        // 交错格式整帧数据都在平面 0；planeIndex 是 copyTo 的必填参数，漏了会抛异常
+        audioData.copyTo(inter, { planeIndex: 0, format: fmt });
         for (let c = 0; c < numberOfChannels; c += 1) {
           const ch = new Float32Array(numberOfFrames);
           for (let i = 0; i < numberOfFrames; i += 1) ch[i] = inter[i * numberOfChannels + c];
@@ -415,7 +414,11 @@ export class AudioPlayer {
       src.start(this._nextTime);
       this._nextTime += dur;
     } catch (e) {
-      this.log("音频播放出错：" + (e?.message || e), "err");
+      // 播放出错同样防刷屏：最多打 3 条，之后安静跳过
+      this._playErrors = (this._playErrors || 0) + 1;
+      if (this._playErrors <= 3) {
+        this.log("音频播放出错：" + (e?.message || e), "err");
+      }
       try { audioData.close(); } catch {}
     }
   }
