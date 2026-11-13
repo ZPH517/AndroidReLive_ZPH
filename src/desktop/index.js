@@ -64,8 +64,22 @@ export function createDesktop({ layer, taskbar, tools = [], log = () => {} }) {
   trayAudio.title = "声音";
   trayAudio.style.cssText =
     "background:transparent;border:none;color:inherit;cursor:pointer;font-size:14px;padding:0 6px;line-height:1;";
+  const trayAudioVol = document.createElement("input");
+  trayAudioVol.type = "range";
+  trayAudioVol.id = "trayAudioVol";
+  trayAudioVol.min = "0";
+  trayAudioVol.max = "1";
+  trayAudioVol.step = "0.05";
+  trayAudioVol.value = "1";
+  trayAudioVol.hidden = true;
+  trayAudioVol.title = "音量";
+  trayAudioVol.style.cssText = "width:64px;vertical-align:middle;";
+  trayAudioVol.addEventListener("input", () => {
+    if (window.ReLive && window.ReLive.setAudioVolume) window.ReLive.setAudioVolume(Number(trayAudioVol.value));
+  });
   if (trayClock && trayClock.parentElement) {
     trayClock.parentElement.insertBefore(trayAudio, trayClock);
+    trayClock.parentElement.insertBefore(trayAudioVol, trayAudio);
   }
   if (window.ReLive && window.ReLive.setAudioStateCb) {
     window.ReLive.setAudioStateCb((s) => {
@@ -77,12 +91,15 @@ export function createDesktop({ layer, taskbar, tools = [], log = () => {} }) {
         return;
       }
       trayAudio.hidden = !s.available;
+      trayAudioVol.hidden = !s.available;
       trayAudio.textContent = s.muted ? "🔇" : "🔊";
-      trayAudio.title = s.muted ? "声音已静音（点击开启）" : "声音开启（点击静音）";
+      if (s.running === false) trayAudio.title = "声音已就绪，点击播放";
+      else trayAudio.title = s.muted ? "声音已静音（点击开启）" : "声音开启（点击静音）";
     });
   }
   trayAudio.addEventListener("click", () => {
     if (!window.ReLive || !window.ReLive.toggleAudioMuted) return;
+    if (window.ReLive.resumeAudio) window.ReLive.resumeAudio(); // 在用户手势内唤醒 AudioContext
     const muted = window.ReLive.toggleAudioMuted();
     trayAudio.textContent = muted ? "🔇" : "🔊";
   });

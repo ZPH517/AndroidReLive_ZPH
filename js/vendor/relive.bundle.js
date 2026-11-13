@@ -5877,6 +5877,21 @@ var AudioPlayer = class {
     this._nextTime = 0;
     this._closed = false;
     this._configured = false;
+    this._everResumed = false;
+  }
+  /** 在用户手势内调用，唤醒被浏览器自动播放策略暂停的 AudioContext */
+  async resume() {
+    if (!this.ctx) return false;
+    if (this.ctx.state !== "running") {
+      try {
+        await this.ctx.resume();
+      } catch {
+        return false;
+      }
+    }
+    const running = this.ctx.state === "running";
+    this.onState({ available: true, muted: this.muted, volume: this.volume, running });
+    return running;
   }
   async start(codec, stream) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -6007,6 +6022,7 @@ var AudioPlayer = class {
       audioData.close();
       const dur = numberOfFrames / sampleRate;
       if (this._nextTime < this.ctx.currentTime) this._nextTime = this.ctx.currentTime + 0.03;
+      else if (this._nextTime > this.ctx.currentTime + 0.5) this._nextTime = this.ctx.currentTime + 0.03;
       const src = this.ctx.createBufferSource();
       src.buffer = ab;
       src.connect(this.gain);
@@ -6107,9 +6123,21 @@ function setAudioMuted(m) {
 function setAudioVolume(v) {
   if (activeAudio) activeAudio.setVolume(v);
 }
+function resumeAudio() {
+  if (activeAudio) return activeAudio.resume();
+  return Promise.resolve(false);
+}
 function toggleAudioMuted() {
-  const m = activeAudio ? !activeAudio.muted : true;
-  if (activeAudio) activeAudio.setMuted(m);
+  if (!activeAudio) return true;
+  if (!activeAudio._everResumed) {
+    activeAudio._everResumed = true;
+    activeAudio.resume();
+    activeAudio.setMuted(false);
+    return false;
+  }
+  const m = !activeAudio.muted;
+  activeAudio.setMuted(m);
+  if (!m) activeAudio.resume();
   return m;
 }
 function getAudioState() {
@@ -6718,6 +6746,7 @@ var ReLive = {
   setAudioStateCb,
   setAudioMuted,
   setAudioVolume,
+  resumeAudio,
   toggleAudioMuted,
   getAudioState
 };
@@ -9679,8 +9708,22 @@ function createDesktop({ layer, taskbar, tools = [], log = () => {
   trayAudio.textContent = "\u{1F50A}";
   trayAudio.title = "\u58F0\u97F3";
   trayAudio.style.cssText = "background:transparent;border:none;color:inherit;cursor:pointer;font-size:14px;padding:0 6px;line-height:1;";
+  const trayAudioVol = document.createElement("input");
+  trayAudioVol.type = "range";
+  trayAudioVol.id = "trayAudioVol";
+  trayAudioVol.min = "0";
+  trayAudioVol.max = "1";
+  trayAudioVol.step = "0.05";
+  trayAudioVol.value = "1";
+  trayAudioVol.hidden = true;
+  trayAudioVol.title = "\u97F3\u91CF";
+  trayAudioVol.style.cssText = "width:64px;vertical-align:middle;";
+  trayAudioVol.addEventListener("input", () => {
+    if (window.ReLive && window.ReLive.setAudioVolume) window.ReLive.setAudioVolume(Number(trayAudioVol.value));
+  });
   if (trayClock && trayClock.parentElement) {
     trayClock.parentElement.insertBefore(trayAudio, trayClock);
+    trayClock.parentElement.insertBefore(trayAudioVol, trayAudio);
   }
   if (window.ReLive && window.ReLive.setAudioStateCb) {
     window.ReLive.setAudioStateCb((s) => {
@@ -9692,12 +9735,15 @@ function createDesktop({ layer, taskbar, tools = [], log = () => {
         return;
       }
       trayAudio.hidden = !s.available;
+      trayAudioVol.hidden = !s.available;
       trayAudio.textContent = s.muted ? "\u{1F507}" : "\u{1F50A}";
-      trayAudio.title = s.muted ? "\u58F0\u97F3\u5DF2\u9759\u97F3\uFF08\u70B9\u51FB\u5F00\u542F\uFF09" : "\u58F0\u97F3\u5F00\u542F\uFF08\u70B9\u51FB\u9759\u97F3\uFF09";
+      if (s.running === false) trayAudio.title = "\u58F0\u97F3\u5DF2\u5C31\u7EEA\uFF0C\u70B9\u51FB\u64AD\u653E";
+      else trayAudio.title = s.muted ? "\u58F0\u97F3\u5DF2\u9759\u97F3\uFF08\u70B9\u51FB\u5F00\u542F\uFF09" : "\u58F0\u97F3\u5F00\u542F\uFF08\u70B9\u51FB\u9759\u97F3\uFF09";
     });
   }
   trayAudio.addEventListener("click", () => {
     if (!window.ReLive || !window.ReLive.toggleAudioMuted) return;
+    if (window.ReLive.resumeAudio) window.ReLive.resumeAudio();
     const muted = window.ReLive.toggleAudioMuted();
     trayAudio.textContent = muted ? "\u{1F507}" : "\u{1F50A}";
   });

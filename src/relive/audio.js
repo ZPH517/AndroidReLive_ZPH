@@ -44,6 +44,18 @@ export class AudioPlayer {
     this._nextTime = 0;
     this._closed = false;
     this._configured = false;
+    this._everResumed = false;
+  }
+
+  /** 在用户手势内调用，唤醒被浏览器自动播放策略暂停的 AudioContext */
+  async resume() {
+    if (!this.ctx) return false;
+    if (this.ctx.state !== "running") {
+      try { await this.ctx.resume(); } catch { return false; }
+    }
+    const running = this.ctx.state === "running";
+    this.onState({ available: true, muted: this.muted, volume: this.volume, running });
+    return running;
   }
 
   async start(codec, stream) {
@@ -178,8 +190,9 @@ export class AudioPlayer {
       audioData.close();
 
       const dur = numberOfFrames / sampleRate;
-      // 顺序排期，落后就追到当前时间，避免越积越多
+      // 顺序排期：落后就追到当前时间；若因暂停/卡顿导致排期太靠前太多也拉回，避免越积越多
       if (this._nextTime < this.ctx.currentTime) this._nextTime = this.ctx.currentTime + 0.03;
+      else if (this._nextTime > this.ctx.currentTime + 0.5) this._nextTime = this.ctx.currentTime + 0.03;
       const src = this.ctx.createBufferSource();
       src.buffer = ab;
       src.connect(this.gain);

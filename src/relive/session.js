@@ -112,9 +112,23 @@ export function setAudioMuted(m) {
 export function setAudioVolume(v) {
   if (activeAudio) activeAudio.setVolume(v);
 }
+export function resumeAudio() {
+  if (activeAudio) return activeAudio.resume();
+  return Promise.resolve(false);
+}
+
 export function toggleAudioMuted() {
-  const m = activeAudio ? !activeAudio.muted : true;
-  if (activeAudio) activeAudio.setMuted(m);
+  if (!activeAudio) return true;
+  // 首次点击：在用户手势内唤醒 AudioContext（绕过浏览器自动播放限制），并确保非静音
+  if (!activeAudio._everResumed) {
+    activeAudio._everResumed = true;
+    activeAudio.resume();
+    activeAudio.setMuted(false);
+    return false;
+  }
+  const m = !activeAudio.muted;
+  activeAudio.setMuted(m);
+  if (!m) activeAudio.resume();
   return m;
 }
 export function getAudioState() {
@@ -888,6 +902,7 @@ const ReLive = {
   setAudioStateCb,
   setAudioMuted,
   setAudioVolume,
+  resumeAudio,
   toggleAudioMuted,
   getAudioState,
 };
