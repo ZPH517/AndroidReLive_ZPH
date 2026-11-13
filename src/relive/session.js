@@ -31,6 +31,7 @@ import {
   dumpCrashLog,
   getPowerState,
   getAndroidSdk,
+  getDeviceVolume,
   keepAwake,
   killServerByScid,
   pkillServer,
@@ -38,9 +39,11 @@ import {
   reportInjectIssue,
   resetInjectIssue,
   sendWakeup,
+  setDeviceVolume,
   shCmd,
   waitForServerGone,
   wakeScreen,
+  VOLUME_STREAMS,
 } from "./device.js";
 
 import { AdbScrcpyClient, AdbScrcpyOptions3_3_3 } from "@yume-chan/adb-scrcpy";
@@ -308,7 +311,7 @@ async function forceCleanup(adb, log) {
 
 /* ---------- 会话 ---------- */
 
-function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, log = () => {} }) {
+function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, audioSource = "output", log = () => {} }) {
   const isWindow = mode === "window";
   // 只传 P0 阶段实测跑通过的那几个字段。多传一个看似无害的选项，
   // 都可能让 server 在参数校验阶段直接 Aborted，而它只回一行 "Aborted"。
@@ -320,6 +323,11 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     videoBitRate: bitRate,
     tunnelForward: true, // 浏览器没有本地 TCP 端口做反向隧道
   };
+  // 声音来源（scrcpy 服务端参数 audio_source）：
+  //   "output" = 平板播放的声音（内录，默认）；
+  //   "mic"    = 平板麦克风（"千里传音"：把平板当监听器，听到平板周边的声音）。
+  // 只有开音频时才传，老设备 / 未开音频时不加这个参数。
+  if (audio && audioSource === "mic") base.audioSource = "mic";
   if (!isWindow) base.maxSize = maxSize;
   if (scid) base.scid = scid;
   // DPI 要按缩放比例同步给，否则应用按原密度渲染到小画布上会挤成一条
@@ -346,7 +354,8 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
   }
   log(
     `[诊断] 启动参数 scid=${base.scid ?? "(默认 socket)"} maxSize=${base.maxSize ?? "-"} ` +
-      `maxFps=${base.maxFps} bitRate=${base.videoBitRate} 编码器=${base.videoEncoder ?? "硬件默认"}`,
+      `maxFps=${base.maxFps} bitRate=${base.videoBitRate} 编码器=${base.videoEncoder ?? "硬件默认"}` +
+      (base.audio ? ` 声音来源=${base.audioSource === "mic" ? "千里传音(平板麦克风)" : "设备声音(内录)"}` : ""),
     "dim"
   );
   return base;
@@ -380,6 +389,7 @@ async function startOnce(opts) {
     maxSize = 1280,
     maxFps = 30,
     bitRate = 8000000,
+    audioSource = "output",
     useScid = true,
     log = () => {},
     onIssue = null,
@@ -417,6 +427,7 @@ async function startOnce(opts) {
     bitRate,
     scid,
     audio: audioEnabled,
+    audioSource,
     spawner: capture.spawner,
     log,
   });
@@ -905,6 +916,9 @@ const ReLive = {
   resumeAudio,
   toggleAudioMuted,
   getAudioState,
+  VOLUME_STREAMS,
+  getDeviceVolume: (adb, stream) => getDeviceVolume(adb, stream),
+  setDeviceVolume: (adb, stream, index) => setDeviceVolume(adb, stream, index),
 };
 
 export { ReLive };

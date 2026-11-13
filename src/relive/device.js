@@ -541,6 +541,52 @@ export async function getAndroidSdk(adb) {
   }
 }
 
+/* ---------- 设备系统音量 ----------
+ * 平板的音量和电脑端播放音量是两码事：右下角喇叭滑块只调"电脑这里放多响"，
+ * 这里管的是"平板自己的各路音量"（媒体 / 通话 / 铃声 / 通知 / 闹钟）。
+ * 通过 Android 自带的 `media volume` shell 命令读写，不需要 root。
+ * 输出格式各厂商略有差异，解析失败时把原始输出带回去，界面直接显示原文。
+ */
+export const VOLUME_STREAMS = [
+  { stream: 3, name: "媒体音量", hint: "音乐 / 视频 / 游戏声音" },
+  { stream: 0, name: "通话音量", hint: "打电话时的听筒音量" },
+  { stream: 2, name: "铃声", hint: "来电铃声" },
+  { stream: 5, name: "通知", hint: "App 通知提示音" },
+  { stream: 4, name: "闹钟", hint: "闹钟音量" },
+];
+
+/**
+ * 读取某一路音量。返回 { current, max, raw }；解析不出来时 current/max 为 null。
+ */
+export async function getDeviceVolume(adb, stream) {
+  const out = String(
+    await shCmd(adb, `media volume --stream ${stream} --get`)
+  ).trim();
+  // 常见两种输出："5/15" 或含 "volume 5" 之类；解析失败兜底返回原文
+  let current = null;
+  let max = null;
+  const frac = out.match(/(\d+)\s*\/\s*(\d+)/);
+  if (frac) {
+    current = parseInt(frac[1], 10);
+    max = parseInt(frac[2], 10);
+  } else {
+    const cur = out.match(/volume[^0-9\-]*(\d+)/i);
+    if (cur) current = parseInt(cur[1], 10);
+    const mx = out.match(/max[^0-9\-]*(\d+)/i);
+    if (mx) max = parseInt(mx[1], 10);
+  }
+  return { current, max, raw: out };
+}
+
+/**
+ * 设置某一路音量（0..max）。设完立即回读一次，把真实值带回给界面刷新。
+ */
+export async function setDeviceVolume(adb, stream, index) {
+  const n = Math.max(0, Math.round(Number(index) || 0));
+  await shCmd(adb, `media volume --stream ${stream} --set ${n}`);
+  return getDeviceVolume(adb, stream);
+}
+
 export {
   INJECT_DENIED,
   SCRCPY_MARKER,

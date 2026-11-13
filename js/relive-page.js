@@ -48,8 +48,9 @@ function syncButtons() {
   const on = !!driver;
   $("connect").disabled = on;
   $("disconnect").disabled = !on;
-  ["mirror", "back", "home", "recents", "release", "wake", "files", "appManage", "terminal"].forEach((id) => ($(id).disabled = !on));
+  ["mirror", "back", "home", "recents", "release", "wake", "micMode", "devvol", "files", "appManage", "terminal"].forEach((id) => ($(id).disabled = !on));
   $("startBtn").disabled = !on; // 没连设备时别开着空面板
+  updateMicModeButton();
 }
 
 /* ---------- 设备限制提示 ----------
@@ -346,11 +347,132 @@ $("disconnect").addEventListener("click", async () => {
   driver = null;
   mirrorSessionId = null;
   screenCanvas.classList.remove("on");
+  $("devVolPanel").hidden = true; // 音量面板跟着断开一起收起
   $("empty").style.display = "";
   setStatus("已断开");
   log("已断开连接");
   syncButtons();
 });
+
+/* ---------- 声音来源（千里传音） ----------
+ * "output" = 平板播放的声音（内录，默认）；"mic" = 平板麦克风（千里传音）。
+ * 这是 scrcpy 服务端的启动参数，所以切换 = 重启一次镜像。
+ * 存 localStorage，下次连接自动沿用。 */
+const AUDIO_SOURCE_KEY = "relive.audioSource";
+function getAudioSource() {
+  return localStorage.getItem(AUDIO_SOURCE_KEY) === "mic" ? "mic" : "output";
+}
+function updateMicModeButton() {
+  const btn = $("micMode");
+  if (!btn) return;
+  const mic = getAudioSource() === "mic";
+  btn.classList.toggle("on", mic);
+  btn.title = mic
+    ? "千里传音已开启：正在监听平板麦克风。点一下切回「设备声音」（内录），镜像会自动重启"
+    : "千里传音：把平板麦克风的声音实时传到电脑（挂机监听用）。点一下开启，镜像会自动重启";
+}
+$("micMode").addEventListener("click", async () => {
+  if (!driver || mirrorStarting) return;
+  const next = getAudioSource() === "mic" ? "output" : "mic";
+  localStorage.setItem(AUDIO_SOURCE_KEY, next);
+  updateMicModeButton();
+  if (next === "mic") {
+    log("已切到千里传音：接下来传的是平板麦克风的声音（周边说话、敲击平板都能听到）", "ok");
+    log("提示：把平板放远处当监听器用；不用了再点一下切回设备声音", "dim");
+  } else {
+    log("已切回设备声音（内录）：传平板播放的音乐/视频音", "ok");
+  }
+  // 声音来源是服务端启动参数，正在投屏时要重启镜像才生效
+  if (mirrorSessionId) {
+    log("正在重启镜像以应用新的声音来源…", "dim");
+    await stopMirrorSession();
+    await startMirrorSession();
+  }
+});
+
+/* ---------- 设备音量面板 ----------
+ * 调的是平板自己的系统音量（媒体/通话/铃声/通知/闹钟），
+ * 与右下角 🔊（电脑端播放音量）互不影响。 */
+let devVolBusy = false;
+async function renderDevVolumes() {
+  const rows = $("devVolRows");
+  if (!driver || !window.ReLive?.VOLUME_STREAMS) {
+    rows.innerHTML = '<div class="dv-raw">设备未连接</div>';
+    return;
+  }
+  rows.innerHTML = "";
+  for (const s of window.ReLive.VOLUME_STREAMS) {
+    const row = document.createElement("div");
+    row.className = "dv-row";
+    const name = document.createElement("span");
+    name.className = "dv-name";
+    name.textContent = s.name;
+    const hint = document.createElement("span");
+    hint.className = "dv-hint";
+    hint.textContent = s.hint;
+    const slider = document.createElement("input");
+    slider.type = "range";
+    slider.min = "0";
+    slider.max = "15";
+    slider.disabled = true; // 读到真实 max 前先锁住
+    const val = document.createElement("span");
+    val.className = "dv-val";
+    val.textContent = "读取中…";
+    row.append(name, hint, slider, val);
+    rows.appendChild(row);
+
+    try {
+      const info = await window.ReLive.getDeviceVolume(driver.adb, s.stream);
+      const max = info.max && info.max > 0 ? info.max : (s.stream === 3 ? 15 : 7);
+      slider.max = String(max);
+      if (info.current !== null && info.current !== undefined) {
+        slider.value = String(Math.min(info.current, max));
+        val.textContent = `${info.current}/${max}`;
+        slider.disabled = false;
+      } else {
+        // 解析失败：把原始输出亮出来，方便排查这台机器的输出格式
+        val.textContent = "";
+        const raw = document.createElement("span");
+        raw.className = "dv-raw";
+        raw.textContent = info.raw || "（无输出）";
+        row.appendChild(raw);
+        slider.disabled = false;
+        slider.value = "0";
+      }
+      // 松手才下发，避免拖动过程中连发一堆 shell 命令
+      slider.addEventListener("change", async () => {
+        if (devVolBusy) return;
+        devVolBusy = true;
+        val.textContent = "设置中…";
+        try {
+          const after = await window.ReLive.setDeviceVolume(driver.adb, s.stream, Number(slider.value));
+          const m = after?.max && after.max > 0 ? after.max : max;
+          val.textContent = after?.current !== null && after?.current !== undefined ? `${after.current}/${m}` : "已下发";
+          log(`已把「${s.name}」设为 ${slider.value}（实际读到：${after?.current ?? "?"}/${m}）`, "dim");
+        } catch (e) {
+          val.textContent = "失败";
+          log(`设置「${s.name}」失败：${e?.message || e}`, "err");
+        } finally {
+          devVolBusy = false;
+        }
+      });
+    } catch (e) {
+      val.textContent = "读取失败";
+      const raw = document.createElement("span");
+      raw.className = "dv-raw";
+      raw.textContent = String(e?.message || e);
+      row.appendChild(raw);
+    }
+  }
+}
+$("devvol").addEventListener("click", () => {
+  const panel = $("devVolPanel");
+  const opening = panel.hidden;
+  panel.hidden = !opening;
+  if (opening) renderDevVolumes();
+});
+$("devVolClose").addEventListener("click", () => { $("devVolPanel").hidden = true; });
+$("devVolRefresh").addEventListener("click", () => { if (!$("devVolPanel").hidden) renderDevVolumes(); });
 
 /* ---------- 主屏镜像 ----------
  * 抽成两个函数，连接成功后自动 start，顶栏按钮再负责"开关切换"。
@@ -374,6 +496,8 @@ async function startMirrorSession() {
       maxSize: 1280,
       maxFps: 30,
       bitRate: 8000000,
+      // 声音来源跟随「千里传音」按钮的选择（服务端启动参数，重启镜像才生效）
+      audioSource: getAudioSource(),
       // kind 必须透传：以前这里只接一个参数，服务端 DEBUG 和逐条触摸全部降级失败，
       // 「详细日志」开关对镜像这条链等于没生效，默认日志里刷一大片。
       log: (text, kind = "") => log(`[镜像] ${text}`, kind),

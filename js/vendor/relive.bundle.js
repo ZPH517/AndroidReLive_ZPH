@@ -337,6 +337,36 @@ async function getAndroidSdk(adb) {
     return 0;
   }
 }
+var VOLUME_STREAMS = [
+  { stream: 3, name: "\u5A92\u4F53\u97F3\u91CF", hint: "\u97F3\u4E50 / \u89C6\u9891 / \u6E38\u620F\u58F0\u97F3" },
+  { stream: 0, name: "\u901A\u8BDD\u97F3\u91CF", hint: "\u6253\u7535\u8BDD\u65F6\u7684\u542C\u7B52\u97F3\u91CF" },
+  { stream: 2, name: "\u94C3\u58F0", hint: "\u6765\u7535\u94C3\u58F0" },
+  { stream: 5, name: "\u901A\u77E5", hint: "App \u901A\u77E5\u63D0\u793A\u97F3" },
+  { stream: 4, name: "\u95F9\u949F", hint: "\u95F9\u949F\u97F3\u91CF" }
+];
+async function getDeviceVolume(adb, stream) {
+  const out = String(
+    await shCmd(adb, `media volume --stream ${stream} --get`)
+  ).trim();
+  let current = null;
+  let max = null;
+  const frac = out.match(/(\d+)\s*\/\s*(\d+)/);
+  if (frac) {
+    current = parseInt(frac[1], 10);
+    max = parseInt(frac[2], 10);
+  } else {
+    const cur = out.match(/volume[^0-9\-]*(\d+)/i);
+    if (cur) current = parseInt(cur[1], 10);
+    const mx = out.match(/max[^0-9\-]*(\d+)/i);
+    if (mx) max = parseInt(mx[1], 10);
+  }
+  return { current, max, raw: out };
+}
+async function setDeviceVolume(adb, stream, index) {
+  const n = Math.max(0, Math.round(Number(index) || 0));
+  await shCmd(adb, `media volume --stream ${stream} --set ${n}`);
+  return getDeviceVolume(adb, stream);
+}
 
 // node_modules/@yume-chan/scrcpy/esm/base/audio.js
 var ScrcpyAudioCodec = class _ScrcpyAudioCodec {
@@ -6417,7 +6447,7 @@ async function forceCleanup(adb, log) {
   cleanedDrivers.delete(adb);
   await pkillServer(adb, log);
 }
-function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, log = () => {
+function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, audioSource = "output", log = () => {
 } }) {
   const isWindow = mode === "window";
   const base = {
@@ -6429,6 +6459,7 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     tunnelForward: true
     // 浏览器没有本地 TCP 端口做反向隧道
   };
+  if (audio && audioSource === "mic") base.audioSource = "mic";
   if (!isWindow) base.maxSize = maxSize;
   if (scid) base.scid = scid;
   if (isWindow) {
@@ -6446,7 +6477,7 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     );
   }
   log(
-    `[\u8BCA\u65AD] \u542F\u52A8\u53C2\u6570 scid=${base.scid ?? "(\u9ED8\u8BA4 socket)"} maxSize=${base.maxSize ?? "-"} maxFps=${base.maxFps} bitRate=${base.videoBitRate} \u7F16\u7801\u5668=${base.videoEncoder ?? "\u786C\u4EF6\u9ED8\u8BA4"}`,
+    `[\u8BCA\u65AD] \u542F\u52A8\u53C2\u6570 scid=${base.scid ?? "(\u9ED8\u8BA4 socket)"} maxSize=${base.maxSize ?? "-"} maxFps=${base.maxFps} bitRate=${base.videoBitRate} \u7F16\u7801\u5668=${base.videoEncoder ?? "\u786C\u4EF6\u9ED8\u8BA4"}` + (base.audio ? ` \u58F0\u97F3\u6765\u6E90=${base.audioSource === "mic" ? "\u5343\u91CC\u4F20\u97F3(\u5E73\u677F\u9EA6\u514B\u98CE)" : "\u8BBE\u5907\u58F0\u97F3(\u5185\u5F55)"}` : ""),
     "dim"
   );
   return base;
@@ -6475,6 +6506,7 @@ async function startOnce(opts) {
     maxSize = 1280,
     maxFps = 30,
     bitRate = 8e6,
+    audioSource = "output",
     useScid = true,
     log = () => {
     },
@@ -6507,6 +6539,7 @@ async function startOnce(opts) {
     bitRate,
     scid,
     audio: audioEnabled,
+    audioSource,
     spawner: capture.spawner,
     log
   });
@@ -6906,7 +6939,10 @@ var ReLive = {
   setAudioVolume,
   resumeAudio,
   toggleAudioMuted,
-  getAudioState
+  getAudioState,
+  VOLUME_STREAMS,
+  getDeviceVolume: (adb, stream) => getDeviceVolume(adb, stream),
+  setDeviceVolume: (adb, stream, index) => setDeviceVolume(adb, stream, index)
 };
 var session_default = ReLive;
 

@@ -50,6 +50,9 @@ See LICENSE for the full license text.
   <button id="release" class="ghost" disabled title="设备端如果卡在“按住”状态，点一下清掉">✋ 松手</button>
   <button id="wake" class="ghost" disabled title="平板熄屏后点这个叫醒（投屏启动前也会自动叫一次）">☀ 唤醒</button>
   <span class="sep"></span>
+  <button id="micMode" class="ghost" disabled title="千里传音：把平板麦克风的声音实时传到电脑。再点一次切回「设备声音」（内录）。切换会自动重启镜像">🎙 千里传音</button>
+  <button id="devvol" class="ghost" disabled title="调节平板自己的各路音量：媒体 / 通话 / 铃声 / 通知 / 闹钟（右下角喇叭只调电脑端的播放音量）">🎚 设备音量</button>
+  <span class="sep"></span>
   <button id="files" class="ghost" disabled title="浏览平板文件、上传下载">📁 文件</button>
   <button id="appManage" class="ghost" disabled title="查看/启用/禁用/卸载/恢复应用，安装与提取 APK，导出清单">应用管理</button>
   <button id="terminal" class="ghost" disabled title="在设备上直接执行 shell 命令，交互式终端">&gt;_ 终端</button>
@@ -113,6 +116,18 @@ See LICENSE for the full license text.
     </div>
     <div class="wp-hint">配对成功后，点「扫描设备」会出现「可直连」条目，再点它的「连接」即可。</div>
   </details>
+</section>
+
+<!-- 设备音量面板：点顶栏「设备音量」出现。读写的是平板自己的各路系统音量。 -->
+<section class="wireless-panel" id="devVolPanel" hidden>
+  <div class="wp-row">
+    <strong style="font-size:13px">平板音量</strong>
+    <span class="wp-hint">直接调平板的系统音量；右下角 🔊 只调"电脑端放多响"，两者互不影响</span>
+    <span class="wp-spacer"></span>
+    <button id="devVolRefresh" class="ghost" type="button">刷新</button>
+    <button id="devVolClose" class="ghost" type="button">收起</button>
+  </div>
+  <div id="devVolRows"></div>
 </section>
 
 <main>
