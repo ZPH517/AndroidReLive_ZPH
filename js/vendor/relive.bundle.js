@@ -5865,8 +5865,10 @@ function parseAacConfig(data) {
 }
 var AudioPlayer = class {
   constructor({ onState = () => {
+  }, log = () => {
   } } = {}) {
     this.onState = onState;
+    this.log = log;
     this.ctx = null;
     this.gain = null;
     this.decoder = null;
@@ -5878,6 +5880,8 @@ var AudioPlayer = class {
     this._closed = false;
     this._configured = false;
     this._everResumed = false;
+    this._gotConfig = false;
+    this._pktCount = 0;
   }
   /** 在用户手势内调用，唤醒被浏览器自动播放策略暂停的 AudioContext */
   async resume() {
@@ -5885,21 +5889,25 @@ var AudioPlayer = class {
     if (this.ctx.state !== "running") {
       try {
         await this.ctx.resume();
-      } catch {
+      } catch (e) {
+        this.log("\u97F3\u9891\u5524\u9192\u5931\u8D25\uFF1A" + (e?.message || e), "err");
         return false;
       }
     }
     const running = this.ctx.state === "running";
+    this.log("\u97F3\u9891\u4E0A\u4E0B\u6587\u72B6\u6001\uFF1A" + this.ctx.state, running ? "ok" : "warn");
     this.onState({ available: true, muted: this.muted, volume: this.volume, running });
     return running;
   }
   async start(codec, stream) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) {
+      this.log("\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Audio\uFF0C\u65E0\u6CD5\u64AD\u653E\u8BBE\u5907\u58F0\u97F3", "err");
       this.onState({ available: false, error: "\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 Web Audio" });
       return;
     }
     if (typeof AudioDecoder === "undefined") {
+      this.log("\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 WebCodecs \u97F3\u9891\u89E3\u7801\uFF08AudioDecoder \u4E0D\u5B58\u5728\uFF09", "err");
       this.onState({ available: false, error: "\u5F53\u524D\u6D4F\u89C8\u5668\u4E0D\u652F\u6301 WebCodecs \u97F3\u9891\u89E3\u7801" });
       return;
     }
@@ -5909,7 +5917,8 @@ var AudioPlayer = class {
     } catch {
       try {
         this.ctx = new Ctx();
-      } catch {
+      } catch (e) {
+        this.log("\u65E0\u6CD5\u521B\u5EFA\u97F3\u9891\u4E0A\u4E0B\u6587\uFF1A" + (e?.message || e), "err");
         this.onState({ available: false, error: "\u65E0\u6CD5\u521B\u5EFA\u97F3\u9891\u4E0A\u4E0B\u6587" });
         return;
       }
@@ -5917,13 +5926,30 @@ var AudioPlayer = class {
     this.gain = this.ctx.createGain();
     this.gain.gain.value = this.muted ? 0 : this.volume;
     this.gain.connect(this.ctx.destination);
-    this.decoder = new AudioDecoder({
-      output: (data) => this._play(data),
-      error: (e) => console.warn("[audio] \u89E3\u7801\u9519\u8BEF", e)
-    });
+    try {
+      this.decoder = new AudioDecoder({
+        output: (data) => this._play(data),
+        error: (e) => this.log("\u97F3\u9891\u89E3\u7801\u5668\u9519\u8BEF\uFF1A" + (e?.message || e), "err")
+      });
+    } catch (e) {
+      this.log("\u521B\u5EFA AudioDecoder \u5931\u8D25\uFF1A" + (e?.message || e), "err");
+      this.onState({ available: false, error: "\u521B\u5EFA AudioDecoder \u5931\u8D25\uFF1A" + (e?.message || e) });
+      return;
+    }
+    this.log("\u97F3\u9891\u542F\u52A8\uFF1A\u89E3\u7801\u5668=" + this._webCodec + "\uFF0CAudioContext \u521D\u59CB\u72B6\u6001=" + this.ctx.state, "ok");
     this.reader = stream.getReader();
     this._pump();
-    this.onState({ available: true, muted: this.muted, volume: this.volume });
+    this._gestureResume = () => {
+      this.resume();
+      if (this._gestureResume) {
+        window.removeEventListener("pointerdown", this._gestureResume);
+        window.removeEventListener("keydown", this._gestureResume);
+        this._gestureResume = null;
+      }
+    };
+    window.addEventListener("pointerdown", this._gestureResume);
+    window.addEventListener("keydown", this._gestureResume);
+    this.onState({ available: true, muted: this.muted, volume: this.volume, running: this.ctx.state === "running" });
   }
   async _pump() {
     try {
@@ -5932,23 +5958,35 @@ var AudioPlayer = class {
         if (done) break;
         if (!pkt) continue;
         if (pkt.type === "configuration") {
+          this._gotConfig = true;
+          this.log("\u97F3\u9891\u6536\u5230\u914D\u7F6E\u5305\uFF0C\u957F\u5EA6=" + (pkt.data ? pkt.data.length : 0), "dim");
           this._configure(pkt.data);
         } else if (pkt.type === "data") {
-          if (!this._configured) continue;
+          this._pktCount += 1;
+          if (this._pktCount <= 3) this.log("\u97F3\u9891\u6570\u636E\u5305#" + this._pktCount + " pts=" + pkt.pts, "dim");
+          if (!this._configured) {
+            if (this._webCodec === "opus" && pkt.data && pkt.data.length >= 19) {
+              this.log("\u97F3\u9891\u65E0\u72EC\u7ACB\u914D\u7F6E\u5305\uFF0C\u7528\u9996\u5E27\u6570\u636E\u4F5C\u4E3A Opus \u914D\u7F6E", "dim");
+              this._configure(pkt.data);
+            }
+            if (!this._configured) continue;
+          }
           try {
             const chunk = new EncodedAudioChunk({
-              type: pkt.keyframe ? "key" : "delta",
+              type: "delta",
               timestamp: Number(pkt.pts ?? 0),
               data: pkt.data
             });
             this.decoder.decode(chunk);
           } catch (e) {
-            console.warn("[audio] decode throw", e);
+            this.log("\u97F3\u9891\u89E3\u7801\u629B\u5F02\u5E38\uFF1A" + (e?.message || e), "err");
           }
+        } else {
+          this.log("\u97F3\u9891\u672A\u77E5\u5305\u7C7B\u578B\uFF1A" + JSON.stringify(pkt.type), "warn");
         }
       }
     } catch (e) {
-      console.warn("[audio] \u97F3\u9891\u6D41\u8BFB\u53D6\u7ED3\u675F/\u51FA\u9519", e);
+      this.log("\u97F3\u9891\u6D41\u8BFB\u53D6\u7ED3\u675F/\u51FA\u9519\uFF1A" + (e?.message || e), "warn");
     }
   }
   _configure(configData) {
@@ -5971,8 +6009,9 @@ var AudioPlayer = class {
         description: configData ? new Uint8Array(configData) : void 0
       });
       this._configured = true;
+      this.log("\u97F3\u9891\u89E3\u7801\u5668\u914D\u7F6E\u5B8C\u6210\uFF1A\u58F0\u9053=" + channels + " \u91C7\u6837\u7387=" + sampleRate, "ok");
     } catch (e) {
-      console.warn("[audio] \u89E3\u7801\u5668\u914D\u7F6E\u5931\u8D25", e);
+      this.log("\u97F3\u9891\u89E3\u7801\u5668\u914D\u7F6E\u5931\u8D25\uFF1A" + (e?.message || e), "err");
       this.onState({ available: false, error: "\u97F3\u9891\u89E3\u7801\u5668\u521D\u59CB\u5316\u5931\u8D25\uFF1A" + (e?.message || e) });
       return;
     }
@@ -5987,6 +6026,7 @@ var AudioPlayer = class {
         this.ctx = newCtx;
         old.close().catch(() => {
         });
+        this.log("\u5DF2\u6309\u91C7\u6837\u7387 " + sampleRate + " \u91CD\u5EFA\u97F3\u9891\u4E0A\u4E0B\u6587", "dim");
       } catch {
       }
     }
@@ -5994,13 +6034,16 @@ var AudioPlayer = class {
   _play(audioData) {
     try {
       if (!this.ctx) return;
-      if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {
-      });
+      if (this.ctx.state === "suspended") {
+        this.ctx.resume().catch(() => {
+        });
+      }
       const { numberOfChannels, numberOfFrames, sampleRate } = audioData;
       if (!numberOfFrames || !numberOfChannels) {
         audioData.close();
         return;
       }
+      if (this._pktCount <= 3) this.log("\u97F3\u9891\u5DF2\u89E3\u7801\u4E00\u5E27\uFF0Cctx \u72B6\u6001=" + this.ctx.state, "dim");
       const ab = this.ctx.createBuffer(numberOfChannels, numberOfFrames, sampleRate);
       const fmt = audioData.format || "f32";
       const planar = String(fmt).endsWith("planar");
@@ -6029,7 +6072,7 @@ var AudioPlayer = class {
       src.start(this._nextTime);
       this._nextTime += dur;
     } catch (e) {
-      console.warn("[audio] \u64AD\u653E\u51FA\u9519", e);
+      this.log("\u97F3\u9891\u64AD\u653E\u51FA\u9519\uFF1A" + (e?.message || e), "err");
       try {
         audioData.close();
       } catch {
@@ -6039,15 +6082,20 @@ var AudioPlayer = class {
   setMuted(m) {
     this.muted = !!m;
     if (this.gain) this.gain.gain.value = this.muted ? 0 : this.volume;
-    this.onState({ available: true, muted: this.muted, volume: this.volume });
+    this.onState({ available: true, muted: this.muted, volume: this.volume, running: this.ctx?.state === "running" });
   }
   setVolume(v) {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.gain && !this.muted) this.gain.gain.value = this.volume;
-    this.onState({ available: true, muted: this.muted, volume: this.volume });
+    this.onState({ available: true, muted: this.muted, volume: this.volume, running: this.ctx?.state === "running" });
   }
   stop() {
     this._closed = true;
+    if (this._gestureResume) {
+      window.removeEventListener("pointerdown", this._gestureResume);
+      window.removeEventListener("keydown", this._gestureResume);
+      this._gestureResume = null;
+    }
     try {
       this.reader?.cancel();
     } catch {
@@ -6544,7 +6592,7 @@ async function startOnce(opts) {
     try {
       const audio = await client.audioStream;
       if (audio && audio.type === "success") {
-        const player = new AudioPlayer({ onState: (s) => emitAudioState(s) });
+        const player = new AudioPlayer({ onState: (s) => emitAudioState(s), log: (m, lv) => log("[\u97F3\u9891] " + m, lv || "dim") });
         player.start(audio.codec, audio.stream).catch((e) => log("\u97F3\u9891\u542F\u52A8\u5931\u8D25\uFF1A" + (e?.message || e), "err"));
         session.audio = player;
         activeAudio = player;

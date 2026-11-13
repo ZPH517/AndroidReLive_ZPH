@@ -636,7 +636,7 @@ async function startOnce(opts) {
     try {
       const audio = await client.audioStream;
       if (audio && audio.type === "success") {
-        const player = new AudioPlayer({ onState: (s) => emitAudioState(s) });
+        const player = new AudioPlayer({ onState: (s) => emitAudioState(s), log: (m, lv) => log("[音频] " + m, lv || "dim") });
         player.start(audio.codec, audio.stream).catch((e) => log("音频启动失败：" + (e?.message || e), "err"));
         session.audio = player;
         activeAudio = player;
