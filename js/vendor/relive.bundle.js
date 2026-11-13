@@ -5863,6 +5863,24 @@ function parseAacConfig(data) {
   const sampleRate = freqTable[samplingFreqIndex] || 48e3;
   return { channels: channelConfig || 2, sampleRate };
 }
+function isOpusHead(d) {
+  if (!d || d.length < 8) return false;
+  return d[0] === 79 && d[1] === 112 && d[2] === 117 && d[3] === 115 && // "Opus"
+  d[4] === 72 && d[5] === 101 && d[6] === 97 && d[7] === 100;
+}
+function makeOpusHead(channels = 2, sampleRate = 48e3) {
+  const buf = new Uint8Array(19);
+  const magic = "OpusHead";
+  for (let i = 0; i < 8; i += 1) buf[i] = magic.charCodeAt(i);
+  buf[8] = 1;
+  buf[9] = channels;
+  buf[12] = sampleRate & 255;
+  buf[13] = sampleRate >> 8 & 255;
+  buf[14] = sampleRate >> 16 & 255;
+  buf[15] = sampleRate >> 24 & 255;
+  buf[18] = 0;
+  return buf;
+}
 var AudioPlayer = class {
   constructor({ onState = () => {
   }, log = () => {
@@ -5882,6 +5900,16 @@ var AudioPlayer = class {
     this._everResumed = false;
     this._gotConfig = false;
     this._pktCount = 0;
+    this._ts = 0;
+    this._lastTs = -1;
+    this._decoderErrors = 0;
+    this._lastConfig = null;
+    this._once = /* @__PURE__ */ Object.create(null);
+  }
+  _logOnce(key, msg, level) {
+    if (this._once[key]) return;
+    this._once[key] = true;
+    this.log(msg, level || "dim");
   }
   /** 在用户手势内调用，唤醒被浏览器自动播放策略暂停的 AudioContext */
   async resume() {
@@ -5898,6 +5926,16 @@ var AudioPlayer = class {
     this.log("\u97F3\u9891\u4E0A\u4E0B\u6587\u72B6\u6001\uFF1A" + this.ctx.state, running ? "ok" : "warn");
     this.onState({ available: true, muted: this.muted, volume: this.volume, running });
     return running;
+  }
+  _createDecoder() {
+    this.decoder = new AudioDecoder({
+      output: (data) => this._play(data),
+      error: (e) => {
+        this.log("\u97F3\u9891\u89E3\u7801\u5668\u9519\u8BEF\uFF1A" + (e?.message || e), "err");
+        this._configured = false;
+        this._decoderErrors += 1;
+      }
+    });
   }
   async start(codec, stream) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -5927,10 +5965,7 @@ var AudioPlayer = class {
     this.gain.gain.value = this.muted ? 0 : this.volume;
     this.gain.connect(this.ctx.destination);
     try {
-      this.decoder = new AudioDecoder({
-        output: (data) => this._play(data),
-        error: (e) => this.log("\u97F3\u9891\u89E3\u7801\u5668\u9519\u8BEF\uFF1A" + (e?.message || e), "err")
-      });
+      this._createDecoder();
     } catch (e) {
       this.log("\u521B\u5EFA AudioDecoder \u5931\u8D25\uFF1A" + (e?.message || e), "err");
       this.onState({ available: false, error: "\u521B\u5EFA AudioDecoder \u5931\u8D25\uFF1A" + (e?.message || e) });
@@ -5959,22 +5994,37 @@ var AudioPlayer = class {
         if (!pkt) continue;
         if (pkt.type === "configuration") {
           this._gotConfig = true;
-          this.log("\u97F3\u9891\u6536\u5230\u914D\u7F6E\u5305\uFF0C\u957F\u5EA6=" + (pkt.data ? pkt.data.length : 0), "dim");
+          this.log(
+            "\u97F3\u9891\u6536\u5230\u914D\u7F6E\u5305\uFF0C\u957F\u5EA6=" + (pkt.data ? pkt.data.length : 0) + "\uFF0C\u9996\u5B57\u8282=" + (pkt.data && pkt.data.length ? "0x" + pkt.data[0].toString(16) : "\u7A7A"),
+            "dim"
+          );
           this._configure(pkt.data);
         } else if (pkt.type === "data") {
           this._pktCount += 1;
           if (this._pktCount <= 3) this.log("\u97F3\u9891\u6570\u636E\u5305#" + this._pktCount + " pts=" + pkt.pts, "dim");
-          if (!this._configured) {
-            if (this._webCodec === "opus" && pkt.data && pkt.data.length >= 19) {
-              this.log("\u97F3\u9891\u65E0\u72EC\u7ACB\u914D\u7F6E\u5305\uFF0C\u7528\u9996\u5E27\u6570\u636E\u4F5C\u4E3A Opus \u914D\u7F6E", "dim");
-              this._configure(pkt.data);
+          if (!this._configured || !this.decoder || this.decoder.state !== "configured") {
+            if (this._decoderErrors < 3 && this._lastConfig) {
+              this._logOnce("recreate", "\u97F3\u9891\u89E3\u7801\u5668\u5F02\u5E38\uFF0C\u6B63\u5728\u81EA\u52A8\u91CD\u5EFA\uFF08\u7B2C " + (this._decoderErrors + 1) + " \u6B21\uFF09\u2026", "warn");
+              this._createDecoder();
+              this._configure(this._lastConfig.configData);
             }
-            if (!this._configured) continue;
+            if (!this._configured) {
+              if (!this._lastConfig) {
+                this._logOnce("no-config", "\u5C1A\u672A\u6536\u5230\u53EF\u7528\u7684\u97F3\u9891\u89E3\u7801\u914D\u7F6E\uFF0C\u7B49\u914D\u7F6E\u5305\u5230\u8FBE\u540E\u518D\u8BD5", "dim");
+                continue;
+              }
+              this._logOnce("recreate-fail", "\u97F3\u9891\u89E3\u7801\u5668\u91CD\u5EFA\u540E\u4ECD\u4E0D\u53EF\u7528\uFF0C\u5DF2\u505C\u6B62\u97F3\u9891\uFF08\u4E0D\u5F71\u54CD\u6295\u5C4F\uFF09", "err");
+              break;
+            }
           }
           try {
+            let ts = Number(pkt.pts ?? 0);
+            if (this._lastTs < 0) this._ts = ts;
+            else this._ts = Math.max(ts, this._lastTs + 1);
+            this._lastTs = this._ts;
             const chunk = new EncodedAudioChunk({
               type: "delta",
-              timestamp: Number(pkt.pts ?? 0),
+              timestamp: this._ts,
               data: pkt.data
             });
             this.decoder.decode(chunk);
@@ -5992,8 +6042,18 @@ var AudioPlayer = class {
   _configure(configData) {
     let channels = 2;
     let sampleRate = 48e3;
-    if (this._webCodec === "opus" && configData && configData.length >= 10) {
-      channels = configData[9] || 2;
+    let headForCodec = configData ? new Uint8Array(configData) : null;
+    if (this._webCodec === "opus") {
+      if (isOpusHead(headForCodec)) {
+        channels = headForCodec[9] || 2;
+      } else {
+        if (configData && configData.length >= 10 && configData[9]) channels = configData[9];
+        headForCodec = makeOpusHead(channels, sampleRate);
+        this.log(
+          "\u672A\u6536\u5230\u6807\u51C6 OpusHead\uFF08\u957F\u5EA6=" + (configData ? configData.length : 0) + "\uFF09\uFF0C\u5DF2\u5408\u6210\u9ED8\u8BA4\u5934\uFF1A\u58F0\u9053=" + channels + " \u91C7\u6837\u7387=" + sampleRate,
+          "warn"
+        );
+      }
     } else if (this._webCodec === "mp4a.40.2") {
       const parsed = parseAacConfig(configData);
       if (parsed) {
@@ -6006,10 +6066,12 @@ var AudioPlayer = class {
         codec: this._webCodec,
         sampleRate,
         numberOfChannels: channels,
-        description: configData ? new Uint8Array(configData) : void 0
+        description: headForCodec ? new Uint8Array(headForCodec) : void 0
       });
       this._configured = true;
-      this.log("\u97F3\u9891\u89E3\u7801\u5668\u914D\u7F6E\u5B8C\u6210\uFF1A\u58F0\u9053=" + channels + " \u91C7\u6837\u7387=" + sampleRate, "ok");
+      this._lastConfig = { configData: headForCodec ? new Uint8Array(headForCodec) : null, codec: this._webCodec };
+      this._lastTs = -1;
+      this.log("\u97F3\u9891\u89E3\u7801\u5668\u914D\u7F6E\u5B8C\u6210\uFF1Acodec=" + this._webCodec + " \u58F0\u9053=" + channels + " \u91C7\u6837\u7387=" + sampleRate, "ok");
     } catch (e) {
       this.log("\u97F3\u9891\u89E3\u7801\u5668\u914D\u7F6E\u5931\u8D25\uFF1A" + (e?.message || e), "err");
       this.onState({ available: false, error: "\u97F3\u9891\u89E3\u7801\u5668\u521D\u59CB\u5316\u5931\u8D25\uFF1A" + (e?.message || e) });

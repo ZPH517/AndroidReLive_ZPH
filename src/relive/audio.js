@@ -6,7 +6,8 @@ SPDX-License-Identifier: GPL-3.0-only
 ======================================
 把 scrcpy 推过来的音频流接去浏览器播放：
 
-  · 流里每个包：type:"configuration" 是解码器配置（Opus 即 OpusHead），
+  · 流里每个包：type:"configuration" 是解码器配置（Opus 即 OpusHead，
+                  AAC 即 AudioSpecificConfig），
                   type:"data" 是一帧编码好的音频（pts 单位微秒）。
   · 用浏览器内置 AudioDecoder 解码 Opus / AAC → AudioData → 排进 AudioContext 播放。
   · gain 节点做音量 / 静音；AudioContext 在用户手势（点喇叭 / 页面任意点击）时 resume，
@@ -14,6 +15,15 @@ SPDX-License-Identifier: GPL-3.0-only
 
 只依赖浏览器原生能力，不引第三方库。任何一步失败都只告警、不影响投屏画面。
 每一步都会通过 log() 打到右侧运行日志，前缀 [音频]，方便排错。
+
+这次修的两类坑（2026-11-13）：
+  1. 解码器一旦某一帧解码失败，会进入 "closed" 状态，此时再调 decode() 会同步抛
+     "Failed to execute 'decode' on 'AudioDecoder'"，于是日志疯狂刷同一行错误。
+     现在：decode 前先检查 decoder.state，死了就自动重建（最多 3 次），
+     重建不了就安静地停掉，不再刷屏。
+  2. Opus 必须带 OpusHead 才能解码。服务端有时配置包是空的 / 不是标准 OpusHead，
+     旧代码照样把解码器标成"已配置"，结果第一帧直接把解码器弄死。
+     现在：校验 OpusHead，缺失或非标准就合成一个标准头（立体声 48k），保证能解。
 */
 
 /** 解析 AAC AudioSpecificConfig，拿采样率与声道数（Opus 不需要这个，直接从 OpusHead 取） */
@@ -33,6 +43,32 @@ function parseAacConfig(data) {
   return { channels: channelConfig || 2, sampleRate };
 }
 
+/** OpusHead 魔数：前 8 字节必须是 "OpusHead" */
+function isOpusHead(d) {
+  if (!d || d.length < 8) return false;
+  return (
+    d[0] === 0x4f && d[1] === 0x70 && d[2] === 0x75 && d[3] === 0x73 && // "Opus"
+    d[4] === 0x48 && d[5] === 0x65 && d[6] === 0x61 && d[7] === 0x64    // "Head"
+  );
+}
+
+/** 合成一个标准 OpusHead（channel mapping family 0，无扩展表）。scrcpy 默认立体声 48k。 */
+function makeOpusHead(channels = 2, sampleRate = 48000) {
+  const buf = new Uint8Array(19);
+  const magic = "OpusHead";
+  for (let i = 0; i < 8; i += 1) buf[i] = magic.charCodeAt(i);
+  buf[8] = 1; // version
+  buf[9] = channels; // channel count
+  // 10-11: preskip (LE) = 0
+  buf[12] = sampleRate & 0xff;
+  buf[13] = (sampleRate >> 8) & 0xff;
+  buf[14] = (sampleRate >> 16) & 0xff;
+  buf[15] = (sampleRate >> 24) & 0xff;
+  // 16-17: output gain = 0
+  buf[18] = 0; // channel mapping family 0
+  return buf;
+}
+
 export class AudioPlayer {
   constructor({ onState = () => {}, log = () => {} } = {}) {
     this.onState = onState;
@@ -50,6 +86,21 @@ export class AudioPlayer {
     this._everResumed = false;
     this._gotConfig = false;
     this._pktCount = 0;
+    // 解码时间戳：用单调递增计数器，避免服务端 pts 不连续 / 回退导致解码器报错
+    this._ts = 0;
+    this._lastTs = -1;
+    // 解码器因某帧失败进入 closed 后的重建次数上限，避免无限重建
+    this._decoderErrors = 0;
+    // 最近一次成功配置（用于重建时复用）
+    this._lastConfig = null;
+    // 同类提示只打一次，别刷屏
+    this._once = Object.create(null);
+  }
+
+  _logOnce(key, msg, level) {
+    if (this._once[key]) return;
+    this._once[key] = true;
+    this.log(msg, level || "dim");
   }
 
   /** 在用户手势内调用，唤醒被浏览器自动播放策略暂停的 AudioContext */
@@ -67,6 +118,19 @@ export class AudioPlayer {
     this.log("音频上下文状态：" + this.ctx.state, running ? "ok" : "warn");
     this.onState({ available: true, muted: this.muted, volume: this.volume, running });
     return running;
+  }
+
+  _createDecoder() {
+    this.decoder = new AudioDecoder({
+      output: (data) => this._play(data),
+      error: (e) => {
+        this.log("音频解码器错误：" + (e?.message || e), "err");
+        // 解码器一旦出错就进入 closed，后续 decode 必抛异常。标记失效，
+        // 由 _pump 在下一包时自动重建（最多 3 次）。
+        this._configured = false;
+        this._decoderErrors += 1;
+      },
+    });
   }
 
   async start(codec, stream) {
@@ -99,10 +163,7 @@ export class AudioPlayer {
     this.gain.connect(this.ctx.destination);
 
     try {
-      this.decoder = new AudioDecoder({
-        output: (data) => this._play(data),
-        error: (e) => this.log("音频解码器错误：" + (e?.message || e), "err"),
-      });
+      this._createDecoder();
     } catch (e) {
       this.log("创建 AudioDecoder 失败：" + (e?.message || e), "err");
       this.onState({ available: false, error: "创建 AudioDecoder 失败：" + (e?.message || e) });
@@ -136,23 +197,43 @@ export class AudioPlayer {
         if (!pkt) continue;
         if (pkt.type === "configuration") {
           this._gotConfig = true;
-          this.log("音频收到配置包，长度=" + (pkt.data ? pkt.data.length : 0), "dim");
+          this.log(
+            "音频收到配置包，长度=" + (pkt.data ? pkt.data.length : 0) +
+              "，首字节=" + (pkt.data && pkt.data.length ? "0x" + pkt.data[0].toString(16) : "空"),
+            "dim"
+          );
           this._configure(pkt.data);
         } else if (pkt.type === "data") {
           this._pktCount += 1;
           if (this._pktCount <= 3) this.log("音频数据包#" + this._pktCount + " pts=" + pkt.pts, "dim");
-          if (!this._configured) {
-            // Opus 兜底：若服务端没发独立配置包，首帧数据往往就是 OpusHead
-            if (this._webCodec === "opus" && pkt.data && pkt.data.length >= 19) {
-              this.log("音频无独立配置包，用首帧数据作为 Opus 配置", "dim");
-              this._configure(pkt.data);
+
+          // 解码器死了 / 还没配好：先尝试重建（带配置），建不起来就安静退出
+          if (!this._configured || !this.decoder || this.decoder.state !== "configured") {
+            if (this._decoderErrors < 3 && this._lastConfig) {
+              this._logOnce("recreate", "音频解码器异常，正在自动重建（第 " + (this._decoderErrors + 1) + " 次）…", "warn");
+              this._createDecoder();
+              this._configure(this._lastConfig.configData);
             }
-            if (!this._configured) continue;
+            if (!this._configured) {
+              if (!this._lastConfig) {
+                this._logOnce("no-config", "尚未收到可用的音频解码配置，等配置包到达后再试", "dim");
+                continue;
+              }
+              this._logOnce("recreate-fail", "音频解码器重建后仍不可用，已停止音频（不影响投屏）", "err");
+              break;
+            }
           }
+
           try {
+            // 时间戳单调递增：服务端 pts 偶尔回退 / 不连续会让解码器报错，
+            // 这里用计数器保证严格递增。播放节奏由 _nextTime 控制，与 pts 无关。
+            let ts = Number(pkt.pts ?? 0);
+            if (this._lastTs < 0) this._ts = ts;
+            else this._ts = Math.max(ts, this._lastTs + 1);
+            this._lastTs = this._ts;
             const chunk = new EncodedAudioChunk({
               type: "delta",
-              timestamp: Number(pkt.pts ?? 0),
+              timestamp: this._ts,
               data: pkt.data,
             });
             this.decoder.decode(chunk);
@@ -171,9 +252,20 @@ export class AudioPlayer {
   _configure(configData) {
     let channels = 2;
     let sampleRate = 48000;
-    if (this._webCodec === "opus" && configData && configData.length >= 10) {
-      // OpusHead: 第 0~7 字节是 "OpusHead"，第 9 字节是 channel_count
-      channels = configData[9] || 2;
+    let headForCodec = configData ? new Uint8Array(configData) : null;
+
+    if (this._webCodec === "opus") {
+      if (isOpusHead(headForCodec)) {
+        channels = headForCodec[9] || 2;
+      } else {
+        // 服务端没给标准 OpusHead（空包 / 数据帧当配置）：合成一个标准头
+        if (configData && configData.length >= 10 && configData[9]) channels = configData[9];
+        headForCodec = makeOpusHead(channels, sampleRate);
+        this.log(
+          "未收到标准 OpusHead（长度=" + (configData ? configData.length : 0) + "），已合成默认头：声道=" + channels + " 采样率=" + sampleRate,
+          "warn"
+        );
+      }
     } else if (this._webCodec === "mp4a.40.2") {
       const parsed = parseAacConfig(configData);
       if (parsed) {
@@ -181,15 +273,18 @@ export class AudioPlayer {
         sampleRate = parsed.sampleRate;
       }
     }
+
     try {
       this.decoder.configure({
         codec: this._webCodec,
         sampleRate,
         numberOfChannels: channels,
-        description: configData ? new Uint8Array(configData) : undefined,
+        description: headForCodec ? new Uint8Array(headForCodec) : undefined,
       });
       this._configured = true;
-      this.log("音频解码器配置完成：声道=" + channels + " 采样率=" + sampleRate, "ok");
+      this._lastConfig = { configData: headForCodec ? new Uint8Array(headForCodec) : null, codec: this._webCodec };
+      this._lastTs = -1; // 重新计时
+      this.log("音频解码器配置完成：codec=" + this._webCodec + " 声道=" + channels + " 采样率=" + sampleRate, "ok");
     } catch (e) {
       this.log("音频解码器配置失败：" + (e?.message || e), "err");
       this.onState({ available: false, error: "音频解码器初始化失败：" + (e?.message || e) });
