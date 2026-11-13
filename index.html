@@ -1,0 +1,164 @@
+<!doctype html>
+<!--
+SPDX-FileCopyrightText: 2026 晨钟酱Official
+SPDX-License-Identifier: GPL-3.0-only
+See LICENSE for the full license text.
+
+重生控制台主界面：打开 http://127.0.0.1:8125/ 直接就是这一页。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>安卓重生 AndroidReLive · 重生控制台</title>
+<link rel="icon" type="image/x-icon" href="./assets/favicon.ico">
+<!-- ADB 终端用的 xterm.js：普通脚本先加载，模块脚本里才能拿到全局 Terminal / FitAddon -->
+<link rel="stylesheet" href="./css/xterm.css">
+<script src="./js/vendor/xterm.js"></script>
+<script src="./js/vendor/addon-fit.js"></script>
+<link rel="stylesheet" href="./css/relive.css">
+<script type="importmap">
+{
+  "imports": {
+    "@yume-chan/adb": "./js/vendor/adb.js",
+    "@yume-chan/stream-extra": "./js/vendor/stream-extra.js",
+    "@yume-chan/struct": "./js/vendor/struct.js",
+    "@yume-chan/event": "./js/vendor/event.js",
+    "@yume-chan/async": "./js/vendor/async.js",
+    "@yume-chan/no-data-view": "./js/vendor/no-data-view.js"
+  }
+}
+</script>
+</head>
+<body>
+<header>
+  <h1 title="安卓重生 AndroidReLive · 网页版安卓设备重生控制台">安卓重生 ReLive</h1>
+  <span class="status" id="status">未连接</span>
+  <span class="conn-mode" id="connMode" role="group" aria-label="连接方式">
+    <button class="seg active" data-mode="usb" type="button" title="用数据线 + WebUSB 连接（零额外软件）">USB</button>
+    <button class="seg" data-mode="wireless" type="button" title="同 Wi-Fi + 一次性配对，免数据线（需先 npm run bridge 启动桥接）">无线</button>
+  </span>
+  <span class="sep"></span>
+  <button id="connect">连接设备</button>
+  <button id="disconnect" disabled>断开</button>
+  <span class="sep"></span>
+  <button id="mirror" class="ghost" disabled>主屏镜像</button>
+  <span class="sep"></span>
+  <button id="back" class="ghost" disabled title="右键同样可以">← 返回</button>
+  <button id="home" class="ghost" disabled>● 桌面</button>
+  <button id="recents" class="ghost" disabled>▢ 任务</button>
+  <button id="release" class="ghost" disabled title="设备端如果卡在“按住”状态，点一下清掉">✋ 松手</button>
+  <button id="wake" class="ghost" disabled title="平板熄屏后点这个叫醒（投屏启动前也会自动叫一次）">☀ 唤醒</button>
+  <span class="sep"></span>
+  <button id="files" class="ghost" disabled title="浏览平板文件、上传下载">📁 文件</button>
+  <button id="appManage" class="ghost" disabled title="查看/启用/禁用/卸载/恢复应用，安装与提取 APK，导出清单">应用管理</button>
+  <button id="terminal" class="ghost" disabled title="在设备上直接执行 shell 命令，交互式终端">&gt;_ 终端</button>
+  <span class="sep"></span>
+  <button id="verbose" class="ghost" title="显示逐条触摸/诊断/服务端 DEBUG 日志，排查时才需要">详细日志</button>
+  <button id="focus" class="ghost" title="收起右侧日志栏，让投屏画面铺满窗口；再点一次恢复">专注模式</button>
+
+  <div class="dev-issue" id="devIssue" hidden>
+    <span class="di-badge" id="diBadge">!</span>
+    <div class="di-text">
+      <b id="diTitle">这台设备拒绝了电脑模拟点击：鼠标、键盘、唤醒都用不了</b>
+      <div class="di-sub" id="diSub">小米 / 红米 / POCO：设置 → 更多设置 → 开发者选项 → 打开「USB 调试（安全设置）」→ 重启手机 → 重新连接</div>
+      <div class="di-more" id="diMore" hidden>
+        <div>1. 手机先登录小米账号、插一张能用的 SIM 卡、保持联网；Wi-Fi 验证不过就换移动数据。</div>
+        <div>2. 设置 → 更多设置 → 开发者选项（没有这一项：在「我的设备 / 关于手机」里连点「OS 版本 / MIUI 版本」7 次）。</div>
+        <div>3. 打开「USB 调试（安全设置）」；顺手把「USB 安装」也打开，网页里装 APK 要用它。</div>
+        <div>4. <b>重启手机</b> —— 不重启开关不生效，这是最容易漏的一步。</div>
+        <div>5. 重新插线、解锁，弹「允许 USB 调试」时勾「一律允许」再确定。</div>
+        <div>6. 回来点「断开」再「连接设备」，按右边「验证是否已开启」；不报错就成了，最后把「主屏镜像」关掉重开一次。</div>
+        <div>开关置灰 / 提示设备受限：多半是账号或 SIM 卡没满足条件，或小米服务器临时限流，等一会儿再试，反复点没用。</div>
+      </div>
+    </div>
+    <div class="di-actions">
+      <button id="diMoreBtn" class="ghost" type="button">详细步骤</button>
+      <button id="diCheck" type="button">验证是否已开启</button>
+      <button id="diClose" class="ghost" type="button">关闭</button>
+    </div>
+  </div>
+</header>
+
+<!-- 无线连接面板：点顶栏「无线」才出现。所有连接最终都走本地桥接程序（bridge.mjs）。 -->
+<section class="wireless-panel" id="wirelessPanel" hidden>
+  <div class="wp-row">
+    <label>桥接地址</label>
+    <input id="bridgeAddr" value="http://127.0.0.1:8126" spellcheck="false" />
+    <button id="bridgeTest" class="ghost" type="button">测试</button>
+    <span id="bridgeStatus" class="wp-status">未连接</span>
+  </div>
+  <div class="wp-row">
+    <button id="scanBtn" type="button">扫描设备</button>
+    <span id="scanStatus" class="wp-hint"></span>
+    <span class="wp-spacer"></span>
+    <span class="wp-hint">手机需开启：设置 → 开发者选项 → 无线调试（与电脑同一 Wi-Fi）</span>
+  </div>
+  <ul class="device-list" id="deviceList"></ul>
+  <div class="wp-row">
+    <label>手动 IP:端口</label>
+    <input id="manualAddr" placeholder="192.168.1.100:5555" spellcheck="false" />
+    <button id="manualConnect" type="button">连接</button>
+  </div>
+  <details class="wp-pair">
+    <summary>添加新设备（首次配对）</summary>
+    <div class="wp-row">
+      <label>配对地址</label>
+      <input id="pairAddr" placeholder="手机无线调试里的配对地址，如 192.168.1.100:37000" spellcheck="false" />
+    </div>
+    <div class="wp-row">
+      <label>配对码</label>
+      <input id="pairCode" placeholder="手机上的 6 位配对码" inputmode="numeric" maxlength="6" />
+      <button id="pairBtn" type="button">配对</button>
+    </div>
+    <div class="wp-hint">配对成功后，点「扫描设备」会出现「可直连」条目，再点它的「连接」即可。</div>
+  </details>
+</section>
+
+<main>
+  <div class="stage" id="stage">
+    <canvas id="screen"></canvas>
+    <div class="empty" id="empty">
+      连接设备后会自动出现画面<br>
+      <small>画面内：左键点按 / 拖动，右键返回，滚轮滚动，可键盘输入</small><br>
+      <small>文件、应用管理、终端都在顶栏，和投屏共用一条连接</small>
+    </div>
+  </div>
+
+  <aside class="right">
+    <h2>运行日志</h2>
+    <div id="log"></div>
+    <footer>
+      <span id="metrics">—</span>
+      <span id="build">—</span>
+    </footer>
+  </aside>
+  <!-- 桌面层盖在 main 上：投屏画面铺底，工具窗口浮在上面 -->
+  <div id="desktop"></div>
+</main>
+
+<!-- 面板容器平时收在这里（隐藏），开窗口时才搬进窗口 body；
+     关闭只搬回来，面板实例和会话都留着，不重新挂载 -->
+<div id="winHosts" hidden>
+  <div class="fp" id="fpPanel"></div>
+  <div class="ap" id="apPanel"></div>
+  <div class="tm" id="tmPanel"></div>
+  <div class="st" id="stPanel"></div>
+  <div class="ss" id="ssPanel"></div>
+</div>
+
+<footer id="taskbar">
+  <button id="startBtn" title="打开所有设备工具">开始</button>
+  <div id="startMenu" hidden></div>
+  <div id="taskButtons"></div>
+  <div class="tb-tray">
+    <span id="trayDevice">未连接</span>
+    <b id="trayBattery" hidden></b>
+    <span id="trayClock"></span>
+    <span id="trayBuild">—</span>
+  </div>
+</footer>
+
+<script type="module" src="./js/relive-page.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+# 依赖与构建中间产物
+node_modules/
+dist/
+.tmp/
+*.log
+
+# 系统垃圾文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# 演示素材的剪辑工程（大体积视频，不进仓库）
+help/
+
+# 注意：js/vendor/ 里的构建产物是**故意入库**的，
+# 这样别人 clone 下来不用装 Node 就能直接跑。不要加入忽略列表。

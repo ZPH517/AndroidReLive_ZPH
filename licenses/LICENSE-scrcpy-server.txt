@@ -1,0 +1,35 @@
+scrcpy-server-v3.3.3.jar —— 第三方组件许可声明
+================================================
+
+文件
+  js/vendor/scrcpy-server-v3.3.3.jar
+
+来源
+  https://github.com/Genymobile/scrcpy
+  发布版本 v3.3.3
+
+版权
+  Copyright (c) 2017 Genymobile
+
+许可
+  Apache License, Version 2.0
+  许可证全文：https://www.apache.org/licenses/LICENSE-2.0
+
+修改情况
+  无。本文件为上游发布的原始构建产物，未作任何修改。
+
+用途说明
+  本项目把这个 jar 通过 ADB 推送到安卓设备的 /data/local/tmp/ 目录，
+  由设备上的 app_process 启动，用作屏幕采集与 H.264 编码的服务端，
+  并通过 ADB 反向通道把视频流传回浏览器的 WebCodecs 解码器。
+
+  它是"在设备上运行的独立服务程序"，不是被 JavaScript 引用或修改的库代码。
+  上游项目明确允许将该服务端与其他客户端一起分发。
+
+分发注意
+  按 Apache-2.0 第 4 条，分发时需要保留本声明（版权、许可、来源），
+  并在修改过文件时说明修改。本项目未修改该文件。
+
+相关代码
+  src/relive/session.js     —— 推送与启动该 jar
+  src/relive/device.js      —— 设备端进程管理与清理
