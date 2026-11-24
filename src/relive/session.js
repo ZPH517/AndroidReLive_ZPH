@@ -102,12 +102,21 @@ let sessionSeq = 0;
 
 /* 当前活跃音频播放器（镜像会话的），供 UI 控制 */
 let activeAudio = null;
-let audioStateCb = null;
+// 允许多个订阅者：托盘喇叭、音量浮层各订阅一份，后注册的不该把前面的顶掉
+const audioStateListeners = new Set();
 function emitAudioState(s) {
-  if (audioStateCb) audioStateCb(s);
+  for (const cb of audioStateListeners) {
+    try {
+      cb(s);
+    } catch {
+      /* 单个订阅者出错不拖累其他 */
+    }
+  }
 }
 export function setAudioStateCb(cb) {
-  audioStateCb = cb;
+  if (typeof cb === "function") audioStateListeners.add(cb);
+  else audioStateListeners.clear();
+  return cb;
 }
 export function setAudioMuted(m) {
   if (activeAudio) activeAudio.setMuted(m);
@@ -311,7 +320,7 @@ async function forceCleanup(adb, log) {
 
 /* ---------- 会话 ---------- */
 
-function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, audioSource = "output", log = () => {} }) {
+function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, log = () => {} }) {
   const isWindow = mode === "window";
   // 只传 P0 阶段实测跑通过的那几个字段。多传一个看似无害的选项，
   // 都可能让 server 在参数校验阶段直接 Aborted，而它只回一行 "Aborted"。
@@ -323,11 +332,8 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     videoBitRate: bitRate,
     tunnelForward: true, // 浏览器没有本地 TCP 端口做反向隧道
   };
-  // 声音来源（scrcpy 服务端参数 audio_source）：
-  //   "output" = 平板播放的声音（内录，默认）；
-  //   "mic"    = 平板麦克风（"千里传音"：把平板当监听器，听到平板周边的声音）。
-  // 只有开音频时才传，老设备 / 未开音频时不加这个参数。
-  if (audio && audioSource === "mic") base.audioSource = "mic";
+  // 只收设备播放的声音（scrcpy 默认 audio_source=output，内录）。
+  // 不传 audio_source，让它用服务端默认值，少一个参数少一处被 Aborted 的机会。
   if (!isWindow) base.maxSize = maxSize;
   if (scid) base.scid = scid;
   // DPI 要按缩放比例同步给，否则应用按原密度渲染到小画布上会挤成一条
@@ -355,7 +361,7 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
   log(
     `[诊断] 启动参数 scid=${base.scid ?? "(默认 socket)"} maxSize=${base.maxSize ?? "-"} ` +
       `maxFps=${base.maxFps} bitRate=${base.videoBitRate} 编码器=${base.videoEncoder ?? "硬件默认"}` +
-      (base.audio ? ` 声音来源=${base.audioSource === "mic" ? "千里传音(平板麦克风)" : "设备声音(内录)"}` : ""),
+      (base.audio ? " 声音=设备内录" : ""),
     "dim"
   );
   return base;
@@ -389,7 +395,6 @@ async function startOnce(opts) {
     maxSize = 1280,
     maxFps = 30,
     bitRate = 8000000,
-    audioSource = "output",
     useScid = true,
     log = () => {},
     onIssue = null,
@@ -427,7 +432,6 @@ async function startOnce(opts) {
     bitRate,
     scid,
     audio: audioEnabled,
-    audioSource,
     spawner: capture.spawner,
     log,
   });

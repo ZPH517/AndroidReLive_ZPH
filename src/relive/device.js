@@ -555,35 +555,83 @@ export const VOLUME_STREAMS = [
   { stream: 4, name: "闹钟", hint: "闹钟音量" },
 ];
 
-/**
- * 读取某一路音量。返回 { current, max, raw }；解析不出来时 current/max 为 null。
+/* 音量命令的两种写法，按机器能力自动选：
+ *
+ *   cmd media_session volume —— Android 11+ 都带，实测联想 TB138plus(Android 13)
+ *     只有它能用（这台机器把 /system/bin/media 删了，老写法直接
+ *     "media: inaccessible or not found"，这是之前音量面板一直是空白的真正原因）。
+ *     输出：`[V] volume is 4 in range [0..25]`
+ *   media volume —— 老机器 / 部分厂商保留，输出 `4/25` 或 `volume 10`
+ *
+ * 探测结果按 adb 连接缓存，一台设备只探一次。
  */
-export async function getDeviceVolume(adb, stream) {
-  const out = String(
-    await shCmd(adb, `media volume --stream ${stream} --get`)
-  ).trim();
-  // 常见两种输出："5/15" 或含 "volume 5" 之类；解析失败兜底返回原文
-  let current = null;
-  let max = null;
-  const frac = out.match(/(\d+)\s*\/\s*(\d+)/);
-  if (frac) {
-    current = parseInt(frac[1], 10);
-    max = parseInt(frac[2], 10);
-  } else {
-    const cur = out.match(/volume[^0-9\-]*(\d+)/i);
-    if (cur) current = parseInt(cur[1], 10);
-    const mx = out.match(/max[^0-9\-]*(\d+)/i);
-    if (mx) max = parseInt(mx[1], 10);
+const volProbe = new WeakMap();
+
+function parseVolume(text) {
+  const t = String(text || "");
+  // `[V] volume is 4 in range [0..25]`（cmd media_session）
+  let m = t.match(/volume\s+is\s+(\d+)\s+in\s+range\s*\[\s*(\d+)\s*\.\.\s*(\d+)\s*\]/i);
+  if (m) return { current: +m[1], min: +m[2], max: +m[3], raw: t.trim() };
+  // `4/25`（media volume --get 的常见输出）
+  m = t.match(/(\d+)\s*\/\s*(\d+)/);
+  if (m) return { current: +m[1], min: 0, max: +m[2], raw: t.trim() };
+  // `Current: 10` / `Max: 15` 这类分行输出
+  const cur = t.match(/current[^0-9\-]*(\d+)/i);
+  const mx = t.match(/max[^0-9\-]*(\d+)/i);
+  if (cur && mx) return { current: +cur[1], min: 0, max: +mx[1], raw: t.trim() };
+  return { current: null, min: null, max: null, raw: t.trim() };
+}
+
+async function detectVolumeTool(adb) {
+  const cached = volProbe.get(adb);
+  if (cached) return cached;
+  let tool = "none";
+  try {
+    const out = String(await shCmd(adb, "cmd media_session volume --stream 3 --get 2>&1"));
+    if (parseVolume(out).current !== null) tool = "media_session";
+  } catch {
+    /* 没有 cmd media_session 就试下一条 */
   }
-  return { current, max, raw: out };
+  if (tool === "none") {
+    try {
+      const out = String(await shCmd(adb, "media volume --stream 3 --get 2>&1"));
+      if (parseVolume(out).current !== null) tool = "media";
+    } catch {
+      /* 两条都没有：这台设备不给 shell 改音量 */
+    }
+  }
+  volProbe.set(adb, tool);
+  return tool;
+}
+
+/** 造一条读/写音量的设备端命令 */
+function volumeCmd(tool, stream, index = null) {
+  const tail = index === null ? "--get" : `--set ${index}`;
+  return tool === "media"
+    ? `media volume --stream ${stream} ${tail} 2>&1`
+    : `cmd media_session volume --stream ${stream} ${tail} 2>&1`;
 }
 
 /**
- * 设置某一路音量（0..max）。设完立即回读一次，把真实值带回给界面刷新。
+ * 读取某一路音量。返回 { current, max, min, raw, tool }；读不出来时 current/max 为 null。
+ */
+export async function getDeviceVolume(adb, stream) {
+  const tool = await detectVolumeTool(adb);
+  if (tool === "none") {
+    return { current: null, max: null, min: null, raw: "这台设备不允许 shell 读取音量", tool };
+  }
+  const raw = String(await shCmd(adb, volumeCmd(tool, stream)));
+  return { ...parseVolume(raw), tool };
+}
+
+/**
+ * 设置某一路音量（0..max），设完立即回读一次，把真实值带回界面。
  */
 export async function setDeviceVolume(adb, stream, index) {
   const n = Math.max(0, Math.round(Number(index) || 0));
-  await shCmd(adb, `media volume --stream ${stream} --set ${n}`);
+  const tool = await detectVolumeTool(adb);
+  if (tool === "none") return { current: null, max: null, min: null, raw: "不支持", tool };
+  await shCmd(adb, volumeCmd(tool, stream, n));
   return getDeviceVolume(adb, stream);
 }
 

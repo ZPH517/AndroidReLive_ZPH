@@ -27,6 +27,7 @@ function clamp(value, lo, hi) {
  * @param {HTMLElement} opts.taskbar    底部任务栏
  * @param {Array} opts.tools            工具定义，见下
  * @param {Function} opts.log
+ * @param {Function} [opts.onTrayAudioClick] 点任务栏喇叭时回调(el)，由页面侧弹音量浮层
  *
  * tool = {
  *   id, title, mark, color, host, width, height, minWidth, minHeight,
@@ -37,7 +38,7 @@ function clamp(value, lo, hi) {
  *   onEscape(panel)    → 返回 true 表示 Esc 被面板自己吃了，不要关窗
  * }
  */
-export function createDesktop({ layer, taskbar, tools = [], log = () => {} }) {
+export function createDesktop({ layer, taskbar, tools = [], log = () => {}, onTrayAudioClick = null }) {
   const byId = new Map(tools.map((tool) => [tool.id, tool]));
   const wins = new Map();
   let zTop = 20;
@@ -56,53 +57,31 @@ export function createDesktop({ layer, taskbar, tools = [], log = () => {} }) {
   const trayBattery = taskbar.querySelector("#trayBattery");
   const trayClock = taskbar.querySelector("#trayClock");
 
-  /* 声音开关（喇叭按钮）：音频可用时才显示，点击静音/取消静音 */
-  const trayAudio = document.createElement("button");
-  trayAudio.id = "trayAudio";
-  trayAudio.hidden = true;
-  trayAudio.textContent = "🔊";
-  trayAudio.title = "声音";
-  trayAudio.style.cssText =
-    "background:transparent;border:none;color:inherit;cursor:pointer;font-size:14px;padding:0 6px;line-height:1;";
-  const trayAudioVol = document.createElement("input");
-  trayAudioVol.type = "range";
-  trayAudioVol.id = "trayAudioVol";
-  trayAudioVol.min = "0";
-  trayAudioVol.max = "1";
-  trayAudioVol.step = "0.05";
-  trayAudioVol.value = "1";
-  trayAudioVol.hidden = true;
-  trayAudioVol.title = "音量";
-  trayAudioVol.style.cssText = "width:64px;vertical-align:middle;";
-  trayAudioVol.addEventListener("input", () => {
-    if (window.ReLive && window.ReLive.setAudioVolume) window.ReLive.setAudioVolume(Number(trayAudioVol.value));
-  });
-  if (trayClock && trayClock.parentElement) {
-    trayClock.parentElement.insertBefore(trayAudio, trayClock);
-    trayClock.parentElement.insertBefore(trayAudioVol, trayAudio);
+  /* 托盘喇叭：仿 Windows，只负责"图标状态 + 点击入口"。
+     点它弹音量浮层（浮层由页面侧渲染，这里通过 onTrayAudioClick 回调交出去），
+     不在任务栏里塞横条滑块——那条滑块又窄又难拖，windows 也不是这么做的。 */
+  const trayAudio = taskbar.querySelector("#trayVol");
+  if (trayAudio) {
+    trayAudio.addEventListener("click", () => {
+      onTrayAudioClick?.(trayAudio);
+    });
   }
   if (window.ReLive && window.ReLive.setAudioStateCb) {
     window.ReLive.setAudioStateCb((s) => {
-      if (!s) return;
+      if (!s || !trayAudio) return;
       if (s.error) {
-        trayAudio.hidden = false;
         trayAudio.textContent = "🔇";
-        trayAudio.title = "声音：" + s.error;
+        trayAudio.title = "声音不可用：" + s.error;
+        trayAudio.classList.add("warn");
         return;
       }
-      trayAudio.hidden = !s.available;
-      trayAudioVol.hidden = !s.available;
+      trayAudio.classList.remove("warn");
       trayAudio.textContent = s.muted ? "🔇" : "🔊";
-      if (s.running === false) trayAudio.title = "声音已就绪，点击播放";
-      else trayAudio.title = s.muted ? "声音已静音（点击开启）" : "声音开启（点击静音）";
+      if (!s.available) trayAudio.title = "声音：未开启（Android 12+ 才支持内录）";
+      else if (s.running === false) trayAudio.title = "声音已就绪，点开播放";
+      else trayAudio.title = s.muted ? "已静音，点开音量调节" : "声音与音量";
     });
   }
-  trayAudio.addEventListener("click", () => {
-    if (!window.ReLive || !window.ReLive.toggleAudioMuted) return;
-    if (window.ReLive.resumeAudio) window.ReLive.resumeAudio(); // 在用户手势内唤醒 AudioContext
-    const muted = window.ReLive.toggleAudioMuted();
-    trayAudio.textContent = muted ? "🔇" : "🔊";
-  });
 
   /* ---------- 位置记忆 ---------- */
   function persist() {

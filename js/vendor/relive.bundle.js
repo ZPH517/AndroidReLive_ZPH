@@ -344,27 +344,54 @@ var VOLUME_STREAMS = [
   { stream: 5, name: "\u901A\u77E5", hint: "App \u901A\u77E5\u63D0\u793A\u97F3" },
   { stream: 4, name: "\u95F9\u949F", hint: "\u95F9\u949F\u97F3\u91CF" }
 ];
-async function getDeviceVolume(adb, stream) {
-  const out = String(
-    await shCmd(adb, `media volume --stream ${stream} --get`)
-  ).trim();
-  let current = null;
-  let max = null;
-  const frac = out.match(/(\d+)\s*\/\s*(\d+)/);
-  if (frac) {
-    current = parseInt(frac[1], 10);
-    max = parseInt(frac[2], 10);
-  } else {
-    const cur = out.match(/volume[^0-9\-]*(\d+)/i);
-    if (cur) current = parseInt(cur[1], 10);
-    const mx = out.match(/max[^0-9\-]*(\d+)/i);
-    if (mx) max = parseInt(mx[1], 10);
+var volProbe = /* @__PURE__ */ new WeakMap();
+function parseVolume(text) {
+  const t = String(text || "");
+  let m = t.match(/volume\s+is\s+(\d+)\s+in\s+range\s*\[\s*(\d+)\s*\.\.\s*(\d+)\s*\]/i);
+  if (m) return { current: +m[1], min: +m[2], max: +m[3], raw: t.trim() };
+  m = t.match(/(\d+)\s*\/\s*(\d+)/);
+  if (m) return { current: +m[1], min: 0, max: +m[2], raw: t.trim() };
+  const cur = t.match(/current[^0-9\-]*(\d+)/i);
+  const mx = t.match(/max[^0-9\-]*(\d+)/i);
+  if (cur && mx) return { current: +cur[1], min: 0, max: +mx[1], raw: t.trim() };
+  return { current: null, min: null, max: null, raw: t.trim() };
+}
+async function detectVolumeTool(adb) {
+  const cached = volProbe.get(adb);
+  if (cached) return cached;
+  let tool = "none";
+  try {
+    const out = String(await shCmd(adb, "cmd media_session volume --stream 3 --get 2>&1"));
+    if (parseVolume(out).current !== null) tool = "media_session";
+  } catch {
   }
-  return { current, max, raw: out };
+  if (tool === "none") {
+    try {
+      const out = String(await shCmd(adb, "media volume --stream 3 --get 2>&1"));
+      if (parseVolume(out).current !== null) tool = "media";
+    } catch {
+    }
+  }
+  volProbe.set(adb, tool);
+  return tool;
+}
+function volumeCmd(tool, stream, index = null) {
+  const tail = index === null ? "--get" : `--set ${index}`;
+  return tool === "media" ? `media volume --stream ${stream} ${tail} 2>&1` : `cmd media_session volume --stream ${stream} ${tail} 2>&1`;
+}
+async function getDeviceVolume(adb, stream) {
+  const tool = await detectVolumeTool(adb);
+  if (tool === "none") {
+    return { current: null, max: null, min: null, raw: "\u8FD9\u53F0\u8BBE\u5907\u4E0D\u5141\u8BB8 shell \u8BFB\u53D6\u97F3\u91CF", tool };
+  }
+  const raw = String(await shCmd(adb, volumeCmd(tool, stream)));
+  return { ...parseVolume(raw), tool };
 }
 async function setDeviceVolume(adb, stream, index) {
   const n = Math.max(0, Math.round(Number(index) || 0));
-  await shCmd(adb, `media volume --stream ${stream} --set ${n}`);
+  const tool = await detectVolumeTool(adb);
+  if (tool === "none") return { current: null, max: null, min: null, raw: "\u4E0D\u652F\u6301", tool };
+  await shCmd(adb, volumeCmd(tool, stream, n));
   return getDeviceVolume(adb, stream);
 }
 
@@ -6298,12 +6325,19 @@ var pushedDrivers = /* @__PURE__ */ new WeakSet();
 var cleanedDrivers = /* @__PURE__ */ new WeakSet();
 var sessionSeq = 0;
 var activeAudio = null;
-var audioStateCb = null;
+var audioStateListeners = /* @__PURE__ */ new Set();
 function emitAudioState(s) {
-  if (audioStateCb) audioStateCb(s);
+  for (const cb of audioStateListeners) {
+    try {
+      cb(s);
+    } catch {
+    }
+  }
 }
 function setAudioStateCb(cb) {
-  audioStateCb = cb;
+  if (typeof cb === "function") audioStateListeners.add(cb);
+  else audioStateListeners.clear();
+  return cb;
 }
 function setAudioMuted(m) {
   if (activeAudio) activeAudio.setMuted(m);
@@ -6447,7 +6481,7 @@ async function forceCleanup(adb, log) {
   cleanedDrivers.delete(adb);
   await pkillServer(adb, log);
 }
-function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, audioSource = "output", log = () => {
+function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, audio = false, log = () => {
 } }) {
   const isWindow = mode === "window";
   const base = {
@@ -6459,7 +6493,6 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     tunnelForward: true
     // 浏览器没有本地 TCP 端口做反向隧道
   };
-  if (audio && audioSource === "mic") base.audioSource = "mic";
   if (!isWindow) base.maxSize = maxSize;
   if (scid) base.scid = scid;
   if (isWindow) {
@@ -6477,7 +6510,7 @@ function buildInit({ mode, width, height, dpi, maxSize, maxFps, bitRate, scid, a
     );
   }
   log(
-    `[\u8BCA\u65AD] \u542F\u52A8\u53C2\u6570 scid=${base.scid ?? "(\u9ED8\u8BA4 socket)"} maxSize=${base.maxSize ?? "-"} maxFps=${base.maxFps} bitRate=${base.videoBitRate} \u7F16\u7801\u5668=${base.videoEncoder ?? "\u786C\u4EF6\u9ED8\u8BA4"}` + (base.audio ? ` \u58F0\u97F3\u6765\u6E90=${base.audioSource === "mic" ? "\u5343\u91CC\u4F20\u97F3(\u5E73\u677F\u9EA6\u514B\u98CE)" : "\u8BBE\u5907\u58F0\u97F3(\u5185\u5F55)"}` : ""),
+    `[\u8BCA\u65AD] \u542F\u52A8\u53C2\u6570 scid=${base.scid ?? "(\u9ED8\u8BA4 socket)"} maxSize=${base.maxSize ?? "-"} maxFps=${base.maxFps} bitRate=${base.videoBitRate} \u7F16\u7801\u5668=${base.videoEncoder ?? "\u786C\u4EF6\u9ED8\u8BA4"}` + (base.audio ? " \u58F0\u97F3=\u8BBE\u5907\u5185\u5F55" : ""),
     "dim"
   );
   return base;
@@ -6506,7 +6539,6 @@ async function startOnce(opts) {
     maxSize = 1280,
     maxFps = 30,
     bitRate = 8e6,
-    audioSource = "output",
     useScid = true,
     log = () => {
     },
@@ -6539,7 +6571,6 @@ async function startOnce(opts) {
     bitRate,
     scid,
     audio: audioEnabled,
-    audioSource,
     spawner: capture.spawner,
     log
   });
@@ -9879,7 +9910,7 @@ function clamp2(value, lo, hi) {
   return Math.max(lo, Math.min(hi, value));
 }
 function createDesktop({ layer, taskbar, tools = [], log = () => {
-} }) {
+}, onTrayAudioClick = null }) {
   const byId = new Map(tools.map((tool) => [tool.id, tool]));
   const wins = /* @__PURE__ */ new Map();
   let zTop = 20;
@@ -9896,51 +9927,28 @@ function createDesktop({ layer, taskbar, tools = [], log = () => {
   const trayDevice = taskbar.querySelector("#trayDevice");
   const trayBattery = taskbar.querySelector("#trayBattery");
   const trayClock = taskbar.querySelector("#trayClock");
-  const trayAudio = document.createElement("button");
-  trayAudio.id = "trayAudio";
-  trayAudio.hidden = true;
-  trayAudio.textContent = "\u{1F50A}";
-  trayAudio.title = "\u58F0\u97F3";
-  trayAudio.style.cssText = "background:transparent;border:none;color:inherit;cursor:pointer;font-size:14px;padding:0 6px;line-height:1;";
-  const trayAudioVol = document.createElement("input");
-  trayAudioVol.type = "range";
-  trayAudioVol.id = "trayAudioVol";
-  trayAudioVol.min = "0";
-  trayAudioVol.max = "1";
-  trayAudioVol.step = "0.05";
-  trayAudioVol.value = "1";
-  trayAudioVol.hidden = true;
-  trayAudioVol.title = "\u97F3\u91CF";
-  trayAudioVol.style.cssText = "width:64px;vertical-align:middle;";
-  trayAudioVol.addEventListener("input", () => {
-    if (window.ReLive && window.ReLive.setAudioVolume) window.ReLive.setAudioVolume(Number(trayAudioVol.value));
-  });
-  if (trayClock && trayClock.parentElement) {
-    trayClock.parentElement.insertBefore(trayAudio, trayClock);
-    trayClock.parentElement.insertBefore(trayAudioVol, trayAudio);
+  const trayAudio = taskbar.querySelector("#trayVol");
+  if (trayAudio) {
+    trayAudio.addEventListener("click", () => {
+      onTrayAudioClick?.(trayAudio);
+    });
   }
   if (window.ReLive && window.ReLive.setAudioStateCb) {
     window.ReLive.setAudioStateCb((s) => {
-      if (!s) return;
+      if (!s || !trayAudio) return;
       if (s.error) {
-        trayAudio.hidden = false;
         trayAudio.textContent = "\u{1F507}";
-        trayAudio.title = "\u58F0\u97F3\uFF1A" + s.error;
+        trayAudio.title = "\u58F0\u97F3\u4E0D\u53EF\u7528\uFF1A" + s.error;
+        trayAudio.classList.add("warn");
         return;
       }
-      trayAudio.hidden = !s.available;
-      trayAudioVol.hidden = !s.available;
+      trayAudio.classList.remove("warn");
       trayAudio.textContent = s.muted ? "\u{1F507}" : "\u{1F50A}";
-      if (s.running === false) trayAudio.title = "\u58F0\u97F3\u5DF2\u5C31\u7EEA\uFF0C\u70B9\u51FB\u64AD\u653E";
-      else trayAudio.title = s.muted ? "\u58F0\u97F3\u5DF2\u9759\u97F3\uFF08\u70B9\u51FB\u5F00\u542F\uFF09" : "\u58F0\u97F3\u5F00\u542F\uFF08\u70B9\u51FB\u9759\u97F3\uFF09";
+      if (!s.available) trayAudio.title = "\u58F0\u97F3\uFF1A\u672A\u5F00\u542F\uFF08Android 12+ \u624D\u652F\u6301\u5185\u5F55\uFF09";
+      else if (s.running === false) trayAudio.title = "\u58F0\u97F3\u5DF2\u5C31\u7EEA\uFF0C\u70B9\u5F00\u64AD\u653E";
+      else trayAudio.title = s.muted ? "\u5DF2\u9759\u97F3\uFF0C\u70B9\u5F00\u97F3\u91CF\u8C03\u8282" : "\u58F0\u97F3\u4E0E\u97F3\u91CF";
     });
   }
-  trayAudio.addEventListener("click", () => {
-    if (!window.ReLive || !window.ReLive.toggleAudioMuted) return;
-    if (window.ReLive.resumeAudio) window.ReLive.resumeAudio();
-    const muted = window.ReLive.toggleAudioMuted();
-    trayAudio.textContent = muted ? "\u{1F507}" : "\u{1F50A}";
-  });
   function persist() {
     for (const [id, win] of wins) {
       if (win.maximized) continue;
