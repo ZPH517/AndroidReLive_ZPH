@@ -50,13 +50,6 @@ See LICENSE for the full license text.
   <button id="release" class="ghost" disabled title="设备端如果卡在“按住”状态，点一下清掉">✋ 松手</button>
   <button id="wake" class="ghost" disabled title="平板熄屏后点这个叫醒（投屏启动前也会自动叫一次）">☀ 唤醒</button>
   <span class="sep"></span>
-  <button id="micMode" class="ghost" disabled title="千里传音：把平板麦克风的声音实时传到电脑。再点一次切回「设备声音」（内录）。切换会自动重启镜像">🎙 千里传音</button>
-  <button id="devvol" class="ghost" disabled title="调节平板自己的各路音量：媒体 / 通话 / 铃声 / 通知 / 闹钟（右下角喇叭只调电脑端的播放音量）">🎚 设备音量</button>
-  <span class="sep"></span>
-  <button id="files" class="ghost" disabled title="浏览平板文件、上传下载">📁 文件</button>
-  <button id="appManage" class="ghost" disabled title="查看/启用/禁用/卸载/恢复应用，安装与提取 APK，导出清单">应用管理</button>
-  <button id="terminal" class="ghost" disabled title="在设备上直接执行 shell 命令，交互式终端">&gt;_ 终端</button>
-  <span class="sep"></span>
   <button id="verbose" class="ghost" title="显示逐条触摸/诊断/服务端 DEBUG 日志，排查时才需要">详细日志</button>
   <button id="focus" class="ghost" title="收起右侧日志栏，让投屏画面铺满窗口；再点一次恢复">专注模式</button>
 
@@ -91,11 +84,23 @@ See LICENSE for the full license text.
     <button id="bridgeTest" class="ghost" type="button">测试</button>
     <span id="bridgeStatus" class="wp-status">未连接</span>
   </div>
+
+  <!-- 三条快捷通道：新手机走配对、老设备/电视走局域网、最稳的走 USB 一次 -->
+  <div class="wp-actions">
+    <button id="scanBtn" type="button">一键发现设备</button>
+    <button id="usbBtn" class="ghost" type="button">USB 一键开启无线</button>
+    <button id="lanBtn" class="ghost" type="button">扫局域网（电视/老设备）</button>
+    <button id="reconnectBtn" class="ghost" type="button">重连上次设备</button>
+  </div>
+  <div class="wp-tip">
+    <b>Android 11+ 手机</b>：开「无线调试」→ 点「一键发现设备」→ 输 6 位码，以后都能直接连。<br>
+    <b>老手机 / 智能电视 / 盒子</b>：开「ADB 调试（网络调试）」→ 点「扫局域网」→ 设备屏幕上点一次「允许」。<br>
+    <b>最稳、且兼容所有安卓版本</b>：插一次数据线 → 点「USB 一键开启无线」，之后永久免线。
+  </div>
   <div class="wp-row">
-    <button id="scanBtn" type="button">扫描设备</button>
     <span id="scanStatus" class="wp-hint"></span>
     <span class="wp-spacer"></span>
-    <span class="wp-hint">手机需开启：设置 → 开发者选项 → 无线调试（与电脑同一 Wi-Fi）</span>
+    <span class="wp-hint">电脑与设备需在同一 Wi-Fi / 局域网</span>
   </div>
   <ul class="device-list" id="deviceList"></ul>
   <div class="wp-row">
@@ -103,7 +108,7 @@ See LICENSE for the full license text.
     <input id="manualAddr" placeholder="192.168.1.100:5555" spellcheck="false" />
     <button id="manualConnect" type="button">连接</button>
   </div>
-  <details class="wp-pair">
+  <details class="wp-pair" id="pairDetails">
     <summary>添加新设备（首次配对）</summary>
     <div class="wp-row">
       <label>配对地址</label>
@@ -112,22 +117,14 @@ See LICENSE for the full license text.
     <div class="wp-row">
       <label>配对码</label>
       <input id="pairCode" placeholder="手机上的 6 位配对码" inputmode="numeric" maxlength="6" />
-      <button id="pairBtn" type="button">配对</button>
+      <button id="pairBtn" type="button">配对并连接</button>
     </div>
-    <div class="wp-hint">配对成功后，点「扫描设备」会出现「可直连」条目，再点它的「连接」即可。</div>
+    <div class="wp-row">
+      <button id="pairWaitBtn" class="ghost" type="button">等待配对码（不用手抄地址）</button>
+      <span class="wp-hint">在手机上打开配对弹窗后点这里，会自动抓到地址</span>
+    </div>
+    <div class="wp-hint">输满 6 位会自动配对并连接。配对是一次性的，之后换端口也能自动找回。</div>
   </details>
-</section>
-
-<!-- 设备音量面板：点顶栏「设备音量」出现。读写的是平板自己的各路系统音量。 -->
-<section class="wireless-panel" id="devVolPanel" hidden>
-  <div class="wp-row">
-    <strong style="font-size:13px">平板音量</strong>
-    <span class="wp-hint">直接调平板的系统音量；右下角 🔊 只调"电脑端放多响"，两者互不影响</span>
-    <span class="wp-spacer"></span>
-    <button id="devVolRefresh" class="ghost" type="button">刷新</button>
-    <button id="devVolClose" class="ghost" type="button">收起</button>
-  </div>
-  <div id="devVolRows"></div>
 </section>
 
 <main>
@@ -136,7 +133,7 @@ See LICENSE for the full license text.
     <div class="empty" id="empty">
       连接设备后会自动出现画面<br>
       <small>画面内：左键点按 / 拖动，右键返回，滚轮滚动，可键盘输入</small><br>
-      <small>文件、应用管理、终端都在顶栏，和投屏共用一条连接</small>
+      <small>文件、应用管理、终端在左下角「开始」菜单里，和投屏共用一条连接</small>
     </div>
   </div>
 
@@ -169,8 +166,56 @@ See LICENSE for the full license text.
   <div class="tb-tray">
     <span id="trayDevice">未连接</span>
     <b id="trayBattery" hidden></b>
+    <button id="trayQuality" class="tb-tray-btn" type="button" title="投屏画质：网络卡时切到「流畅」，网好时用「高清」">📺 均衡</button>
+    <button id="trayVol" class="tb-tray-btn" type="button" title="声音与音量（点开调音量）">🔊</button>
     <span id="trayClock"></span>
     <span id="trayBuild">—</span>
+  </div>
+
+  <!-- 投屏画质浮层：仿 Windows，点托盘画质按钮弹出；切档后若正在投屏会自动重启画面生效 -->
+  <div id="qualityFlyout" hidden>
+    <div class="vf-head"><span>投屏画质</span><span class="vf-spacer"></span><span class="qf-current" id="qfCurrent">均衡</span></div>
+    <button class="qf-item" data-quality="smooth" type="button">
+      <span class="qf-check">✓</span>
+      <span class="qf-text"><b>流畅</b><small>老路由器 / 设备多 / 网络卡时用，最抗卡</small></span>
+      <span class="qf-spec">960 · 20帧</span>
+    </button>
+    <button class="qf-item" data-quality="balanced" type="button">
+      <span class="qf-check">✓</span>
+      <span class="qf-text"><b>均衡</b><small>推荐：清晰与流畅兼顾</small></span>
+      <span class="qf-spec">1280 · 30帧</span>
+    </button>
+    <button class="qf-item" data-quality="hd" type="button">
+      <span class="qf-check">✓</span>
+      <span class="qf-text"><b>高清</b><small>网络好时用，画面最清晰（耗流量）</small></span>
+      <span class="qf-spec">1920 · 30帧</span>
+    </button>
+    <div class="qf-foot">切换后若正在投屏，画面会自动重启生效</div>
+  </div>
+
+  <!-- 音量浮层：仿 Windows，点任务栏喇叭在托盘上方弹出。
+       第一行是平板媒体音量（就是你在电脑上听到的那个声音），
+       第二行是电脑端播放增益，其余四路平板音量折在下面。 -->
+  <div id="volFlyout" hidden>
+    <div class="vf-head">
+      <span>声音</span>
+      <span class="vf-spacer"></span>
+      <button id="vfMute" class="vf-icon" type="button" title="电脑端静音 / 取消静音">🔊</button>
+    </div>
+    <div class="vf-row">
+      <span class="vf-name" title="平板自己的媒体音量，改它你立刻能听出大小变化">媒体</span>
+      <input id="vfMedia" type="range" min="0" max="15" value="0" disabled />
+      <span id="vfMediaVal" class="vf-num">—</span>
+    </div>
+    <div class="vf-row">
+      <span class="vf-name" title="只在电脑上生效，不影响平板">电脑端</span>
+      <input id="vfPcVol" type="range" min="0" max="1" step="0.05" value="1" disabled />
+      <span id="vfPcVal" class="vf-val">100%</span>
+    </div>
+    <details class="vf-more" id="vfMore">
+      <summary>其他平板音量</summary>
+      <div id="vfDevRows"></div>
+    </details>
   </div>
 </footer>
 
